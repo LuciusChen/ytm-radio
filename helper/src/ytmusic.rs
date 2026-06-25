@@ -3,6 +3,7 @@
 use crate::auth::AuthConfig;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT};
+use reqwest::Proxy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha1::{Digest, Sha1};
@@ -25,6 +26,22 @@ const RESPONSE_CACHE_SEARCH_TTL_SECS: u64 = 2 * 60;
 const RESPONSE_CACHE_DETAIL_TTL_SECS: u64 = 30 * 60;
 const RESPONSE_CACHE_MAX_ENTRIES: usize = 80;
 const TIMINGS_ENV: &str = "YTM_RADIO_TIMINGS";
+
+fn youtube_client(proxy: Option<&str>) -> Result<Client, String> {
+    let proxy = proxy.map(str::trim).filter(|value| !value.is_empty());
+    let mut builder = Client::builder().timeout(Duration::from_secs(30));
+    if let Some(proxy_url) = proxy {
+        builder =
+            builder.proxy(Proxy::all(proxy_url).map_err(|_| "invalid proxy URL".to_string())?);
+    }
+    builder.build().map_err(|error| {
+        if proxy.is_some() {
+            "cannot create HTTP client with proxy".to_string()
+        } else {
+            format!("cannot create HTTP client: {error}")
+        }
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseTarget {
@@ -52,11 +69,9 @@ pub fn browse(
     auth: &AuthConfig,
     initial_only: bool,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response_cache_dir = bootstrap_cache.map(response_cache_dir);
     if matches!(target, BrowseTarget::Library) {
@@ -100,11 +115,9 @@ pub fn continuation(
     limit: usize,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response = request_continuation(
         &client,
@@ -124,11 +137,9 @@ pub fn browse_id(
     limit: usize,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response = request_browse_id(
         &client,
@@ -146,11 +157,9 @@ pub fn search(
     limit: usize,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response = request_search(
         &client,
@@ -167,11 +176,9 @@ pub fn rate(
     rating: &str,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let endpoint = match rating {
         "like" => "like/like",
@@ -195,11 +202,9 @@ pub fn radio(
     limit: usize,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response = request_radio_queue(&client, auth, &bootstrap, video_id)?;
     Ok(normalize_radio_response(video_id, limit, &response))
@@ -209,11 +214,9 @@ pub fn playlist_options(
     video_id: &str,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response = request_add_to_playlist_options(
         &client,
@@ -230,11 +233,9 @@ pub fn add_to_playlist(
     playlist_id: &str,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let clean_playlist_id = clean_playlist_id(playlist_id);
     let body = json!({
@@ -265,11 +266,9 @@ pub fn library(
     action: &str,
     auth: &AuthConfig,
     bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
 ) -> Result<Value, String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let client = youtube_client(proxy)?;
     let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
     let response = request_song_next(&client, auth, &bootstrap, video_id)?;
     let state = song_library_state(&response, video_id)?;
@@ -2979,6 +2978,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn rejects_invalid_proxy_url() {
+        assert_eq!(
+            youtube_client(Some("not a url")).unwrap_err(),
+            "invalid proxy URL"
+        );
+    }
 
     #[test]
     fn computes_sapisid_hash() {

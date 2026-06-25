@@ -105,6 +105,30 @@
                      "Source"))
       (should-not ytm-radio--add-url-process))))
 
+(ert-deftest ytm-radio-yt-dlp-arguments-include-proxy ()
+  "Build yt-dlp arguments with the first-class proxy setting."
+  (let ((ytm-radio-yt-dlp-extra-args '("--cookies-from-browser" "chrome"))
+        (ytm-radio-mpv-ytdl-format "bestaudio/best")
+        (ytm-radio-proxy-url "socks5h://127.0.0.1:7890"))
+    (should (equal (ytm-radio--yt-dlp-metadata-arguments "url")
+                   '("--cookies-from-browser"
+                     "chrome"
+                     "--proxy"
+                     "socks5h://127.0.0.1:7890"
+                     "--flat-playlist"
+                     "--dump-single-json"
+                     "url")))
+    (should (equal (ytm-radio--stream-resolve-arguments "url")
+                   '("--cookies-from-browser"
+                     "chrome"
+                     "--proxy"
+                     "socks5h://127.0.0.1:7890"
+                     "--no-playlist"
+                     "-f"
+                     "bestaudio/best"
+                     "-g"
+                     "url")))))
+
 (ert-deftest ytm-radio-mpv-arguments-include-ytdl-raw-options ()
   "Build mpv arguments with raw ytdl options."
   (let ((ytm-radio-mpv-extra-args '("--really-quiet"))
@@ -113,6 +137,7 @@
                                             "--demuxer-readahead-secs=60"
                                             "--demuxer-max-bytes=256MiB"))
         (ytm-radio-mpv-ytdl-format "bestaudio/best")
+        (ytm-radio-proxy-url nil)
         (ytm-radio-ytdl-raw-options '("cookies-from-browser=chrome"
                                       "proxy=http://127.0.0.1:8888")))
     (should (equal (ytm-radio--mpv-arguments "sock" "url")
@@ -127,6 +152,22 @@
                      "--input-ipc-server=sock"
                      "url")))))
 
+(ert-deftest ytm-radio-mpv-arguments-include-first-class-proxy ()
+  "Build mpv arguments with the first-class proxy setting."
+  (let ((ytm-radio-mpv-extra-args '("--really-quiet"))
+        (ytm-radio-mpv-network-cache-args nil)
+        (ytm-radio-mpv-ytdl-format "bestaudio/best")
+        (ytm-radio-ytdl-raw-options '("cookies-from-browser=chrome"))
+        (ytm-radio-proxy-url "http://127.0.0.1:8888"))
+    (should (equal (ytm-radio--mpv-arguments "sock" "url")
+                   '("--ytdl-format=bestaudio/best"
+                     "--http-proxy=http://127.0.0.1:8888"
+                     "--really-quiet"
+                     "--ytdl-raw-options=cookies-from-browser=chrome,proxy=http://127.0.0.1:8888"
+                     "--no-video"
+                     "--input-ipc-server=sock"
+                     "url")))))
+
 (ert-deftest ytm-radio-mpv-extra-args-can-override-cache-defaults ()
   "Place user mpv args after default mpv playback args."
   (let ((ytm-radio-mpv-network-cache-args '("--cache=yes"
@@ -134,6 +175,7 @@
         (ytm-radio-mpv-ytdl-format "bestaudio/best")
         (ytm-radio-mpv-extra-args '("--demuxer-readahead-secs=5"
                                     "--ytdl-format=worstaudio/best"))
+        (ytm-radio-proxy-url nil)
         (ytm-radio-ytdl-raw-options nil))
     (should (equal (seq-take (ytm-radio--mpv-arguments "sock" "url") 5)
                    '("--cache=yes"
@@ -147,6 +189,7 @@
   (let ((ytm-radio-mpv-network-cache-args nil)
         (ytm-radio-mpv-ytdl-format nil)
         (ytm-radio-mpv-extra-args nil)
+        (ytm-radio-proxy-url nil)
         (ytm-radio-ytdl-raw-options nil))
     (should-not
      (member "--ytdl-format=bestaudio/best"
@@ -155,6 +198,7 @@
 (ert-deftest ytm-radio-playback-url-uses-valid-stream-cache ()
   "Use cached direct stream URLs until they are close to expiry."
   (let* ((ytm-radio--stream-url-cache (make-hash-table :test #'equal))
+         (ytm-radio-proxy-url nil)
          (track (ytm-radio--make-track
                  :id "v1"
                  :title "Song"
@@ -166,6 +210,20 @@
              (list (cons 'url "https://rr.example/expired")
                    (cons 'expires 1))
              ytm-radio--stream-url-cache)
+    (should (equal (ytm-radio--playback-url track)
+                   "https://music.youtube.com/watch?v=v1"))))
+
+(ert-deftest ytm-radio-socks-proxy-skips-direct-stream-cache ()
+  "Do not use cached direct stream URLs when only SOCKS proxy is configured."
+  (let* ((ytm-radio--stream-url-cache (make-hash-table :test #'equal))
+         (ytm-radio-proxy-url "socks5h://127.0.0.1:7890")
+         (track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Song"
+                 :url "https://music.youtube.com/watch?v=v1")))
+    (ytm-radio--cache-stream-url
+     track
+     "https://rr.example/videoplayback?expire=9999999999")
     (should (equal (ytm-radio--playback-url track)
                    "https://music.youtube.com/watch?v=v1"))))
 
@@ -190,6 +248,7 @@
          (ytm-radio--player (ytm-radio--make-player))
          (ytm-radio-mpv-network-cache-args nil)
          (ytm-radio-mpv-extra-args nil)
+         (ytm-radio-proxy-url nil)
          (ytm-radio-ytdl-raw-options nil)
          process
          scheduled)
@@ -2500,7 +2559,8 @@
   "Build Rust helper arguments for library imports."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
         (ytm-radio-helper-use-mock-data t)
-        (ytm-radio-helper-library-limit 25))
+        (ytm-radio-helper-library-limit 25)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-browse-arguments "library")
                    '("browse"
                      "library"
@@ -2514,7 +2574,8 @@
   "Build Rust helper arguments for non-blocking Home imports."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
         (ytm-radio-helper-use-mock-data t)
-        (ytm-radio-helper-home-limit 12))
+        (ytm-radio-helper-home-limit 12)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-browse-arguments "home" t)
                    '("browse"
                      "home"
@@ -2529,7 +2590,8 @@
   "Build Rust helper arguments for Home continuation imports."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
         (ytm-radio-helper-use-mock-data t)
-        (ytm-radio-helper-home-limit 12))
+        (ytm-radio-helper-home-limit 12)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-continuation-arguments "next-page")
                    '("continuation"
                      "next-page"
@@ -2543,7 +2605,8 @@
   "Build Rust helper arguments for search imports."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
         (ytm-radio-helper-use-mock-data t)
-        (ytm-radio-helper-library-limit 25))
+        (ytm-radio-helper-library-limit 25)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-search-arguments "tokyo")
                    '("search"
                      "tokyo"
@@ -2556,7 +2619,8 @@
 (ert-deftest ytm-radio-helper-rate-arguments-include-auth-and-mock ()
   "Build Rust helper arguments for rating tracks."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
-        (ytm-radio-helper-use-mock-data t))
+        (ytm-radio-helper-use-mock-data t)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-rate-arguments "v1" "like")
                    '("rate"
                      "v1"
@@ -2569,7 +2633,8 @@
   "Build Rust helper arguments for current-track actions."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
         (ytm-radio-helper-use-mock-data t)
-        (ytm-radio-helper-library-limit 25))
+        (ytm-radio-helper-library-limit 25)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-radio-arguments "v1")
                    '("radio"
                      "v1"
@@ -2603,7 +2668,8 @@
   "Build Rust helper arguments for detail browse imports."
   (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
         (ytm-radio-helper-use-mock-data t)
-        (ytm-radio-helper-library-limit 25))
+        (ytm-radio-helper-library-limit 25)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-browse-id-arguments "VLPL1")
                    '("browse-id"
                      "VLPL1"
@@ -2617,12 +2683,38 @@
   "Pass YouTube Music browse endpoint params to the helper."
   (let ((ytm-radio-helper-auth-file nil)
         (ytm-radio-helper-use-mock-data nil)
-        (ytm-radio-helper-library-limit 25))
+        (ytm-radio-helper-library-limit 25)
+        (ytm-radio-proxy-url nil))
     (should (equal (ytm-radio--helper-browse-id-arguments "VLPL1" "ggMCCAI%3D")
                    '("browse-id"
                      "VLPL1"
                      "--params"
                      "ggMCCAI%3D"
+                     "--limit"
+                     "25")))))
+
+(ert-deftest ytm-radio-helper-arguments-include-proxy ()
+  "Build Rust helper arguments with the first-class proxy setting."
+  (let ((ytm-radio-helper-auth-file "/tmp/auth.json")
+        (ytm-radio-helper-use-mock-data nil)
+        (ytm-radio-helper-library-limit 25)
+        (ytm-radio-proxy-url "socks5h://127.0.0.1:7890"))
+    (should (equal (ytm-radio--helper-search-arguments "tokyo")
+                   '("search"
+                     "tokyo"
+                     "--auth"
+                     "/tmp/auth.json"
+                     "--proxy"
+                     "socks5h://127.0.0.1:7890"
+                     "--limit"
+                     "25")))
+    (should (equal (ytm-radio--helper-radio-arguments "v1")
+                   '("radio"
+                     "v1"
+                     "--auth"
+                     "/tmp/auth.json"
+                     "--proxy"
+                     "socks5h://127.0.0.1:7890"
                      "--limit"
                      "25")))))
 
@@ -2834,7 +2926,8 @@
   (let ((ytm-radio-helper-login-browser "dia")
         (ytm-radio-helper-login-profile-directory "/tmp/ytm-login-profile")
         (ytm-radio-helper-login-cdp-port 29999)
-        (ytm-radio-helper-login-timeout 60))
+        (ytm-radio-helper-login-timeout 60)
+        (ytm-radio-proxy-url "socks5h://127.0.0.1:7890"))
     (should
      (equal
       (ytm-radio--helper-login-arguments "/tmp/ytm-auth.json")

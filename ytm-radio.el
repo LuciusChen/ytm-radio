@@ -139,6 +139,15 @@ example \"cookies-from-browser=chrome\"."
   :type '(repeat string)
   :group 'ytm-radio)
 
+(defcustom ytm-radio-proxy-url nil
+  "Proxy URL used for YouTube Music network requests.
+When non-nil, this is passed to yt-dlp, mpv's ytdl hook, and the Rust helper.
+HTTP and HTTPS proxy URLs are also passed to mpv's direct media transport.
+The browser login window uses the browser or system proxy configuration."
+  :type '(choice (const :tag "No proxy" nil)
+                 string)
+  :group 'ytm-radio)
+
 (defcustom ytm-radio-helper-command
   (expand-file-name "helper/target/debug/ytm-radio-helper" ytm-radio--directory)
   "External helper executable used to fetch account data."
@@ -688,6 +697,7 @@ LABEL is used in executable diagnostics.  NAME is the process name."
 (defun ytm-radio--yt-dlp-metadata-arguments (url)
   "Return yt-dlp metadata arguments for URL."
   (append ytm-radio-yt-dlp-extra-args
+          (ytm-radio--yt-dlp-proxy-arguments)
           (list "--flat-playlist"
                 "--dump-single-json"
                 url)))
@@ -928,14 +938,38 @@ MESSAGE is shown when login is required."
       ytm-radio-helper-home-limit
     ytm-radio-helper-library-limit))
 
+(defun ytm-radio--proxy-url ()
+  "Return the configured proxy URL, or nil."
+  (when (stringp ytm-radio-proxy-url)
+    (let ((proxy (string-trim ytm-radio-proxy-url)))
+      (unless (string-empty-p proxy)
+        proxy))))
+
+(defun ytm-radio--http-proxy-url-p (proxy)
+  "Return non-nil when PROXY is an HTTP proxy URL."
+  (and (stringp proxy)
+       (let ((case-fold-search t))
+         (string-match-p "\\`https?://" proxy))))
+
+(defun ytm-radio--yt-dlp-proxy-arguments ()
+  "Return yt-dlp proxy arguments, or nil."
+  (when-let* ((proxy (ytm-radio--proxy-url)))
+    (list "--proxy" proxy)))
+
+(defun ytm-radio--helper-shared-arguments ()
+  "Return shared helper arguments for account request commands."
+  (append (when ytm-radio-helper-auth-file
+            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
+          (when-let* ((proxy (ytm-radio--proxy-url)))
+            (list "--proxy" proxy))
+          (when ytm-radio-helper-use-mock-data
+            (list "--mock"))))
+
 (defun ytm-radio--helper-browse-arguments (target &optional initial-only)
   "Return helper arguments for browsing TARGET.
 When INITIAL-ONLY is non-nil, request only the first Home page."
   (append (list "browse" target)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))
+          (ytm-radio--helper-shared-arguments)
           (when initial-only
             (list "--initial-only"))
           (list "--limit"
@@ -944,10 +978,7 @@ When INITIAL-ONLY is non-nil, request only the first Home page."
 (defun ytm-radio--helper-continuation-arguments (token)
   "Return helper arguments for loading continuation TOKEN."
   (append (list "continuation" token)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))
+          (ytm-radio--helper-shared-arguments)
           (list "--limit"
                 (number-to-string ytm-radio-helper-home-limit))))
 
@@ -957,64 +988,43 @@ When INITIAL-ONLY is non-nil, request only the first Home page."
           (when (and (stringp params)
                      (not (string-empty-p params)))
             (list "--params" params))
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))
+          (ytm-radio--helper-shared-arguments)
           (list "--limit"
                 (number-to-string ytm-radio-helper-library-limit))))
 
 (defun ytm-radio--helper-search-arguments (query)
   "Return helper arguments for searching YouTube Music for QUERY."
   (append (list "search" query)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))
+          (ytm-radio--helper-shared-arguments)
           (list "--limit"
                 (number-to-string ytm-radio-helper-library-limit))))
 
 (defun ytm-radio--helper-rate-arguments (video-id rating)
   "Return helper arguments for rating VIDEO-ID with RATING."
   (append (list "rate" video-id rating)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))))
+          (ytm-radio--helper-shared-arguments)))
 
 (defun ytm-radio--helper-radio-arguments (video-id)
   "Return helper arguments for starting radio from VIDEO-ID."
   (append (list "radio" video-id)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))
+          (ytm-radio--helper-shared-arguments)
           (list "--limit"
                 (number-to-string ytm-radio-helper-library-limit))))
 
 (defun ytm-radio--helper-playlist-options-arguments (video-id)
   "Return helper arguments for playlist options for VIDEO-ID."
   (append (list "playlist-options" video-id)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))))
+          (ytm-radio--helper-shared-arguments)))
 
 (defun ytm-radio--helper-add-to-playlist-arguments (video-id playlist-id)
   "Return helper arguments for adding VIDEO-ID to PLAYLIST-ID."
   (append (list "add-to-playlist" video-id playlist-id)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))))
+          (ytm-radio--helper-shared-arguments)))
 
 (defun ytm-radio--helper-library-arguments (video-id action)
   "Return helper arguments for applying library ACTION to VIDEO-ID."
   (append (list "library" video-id action)
-          (when ytm-radio-helper-auth-file
-            (list "--auth" (expand-file-name ytm-radio-helper-auth-file)))
-          (when ytm-radio-helper-use-mock-data
-            (list "--mock"))))
+          (ytm-radio--helper-shared-arguments)))
 
 (defun ytm-radio--helper-login-arguments (output &optional restart-running)
   "Return helper arguments for logging in and writing auth to OUTPUT.
@@ -1479,9 +1489,25 @@ CONTEXT is optional browser metadata from the item that opened the detail."
 
 (defun ytm-radio--mpv-raw-options-argument ()
   "Return the mpv ytdl raw options argument, or nil."
-  (when ytm-radio-ytdl-raw-options
-    (concat "--ytdl-raw-options="
-            (mapconcat #'identity ytm-radio-ytdl-raw-options ","))))
+  (let ((options
+         (append ytm-radio-ytdl-raw-options
+                 (when-let* ((proxy (ytm-radio--proxy-url)))
+                   (list (concat "proxy=" proxy))))))
+    (when options
+      (concat "--ytdl-raw-options="
+              (mapconcat #'identity options ",")))))
+
+(defun ytm-radio--mpv-http-proxy-argument ()
+  "Return the mpv direct HTTP proxy argument, or nil."
+  (when-let* ((proxy (ytm-radio--proxy-url))
+              ((ytm-radio--http-proxy-url-p proxy)))
+    (concat "--http-proxy=" proxy)))
+
+(defun ytm-radio--direct-stream-cache-supported-p ()
+  "Return non-nil when cached direct stream URLs preserve proxy routing."
+  (let ((proxy (ytm-radio--proxy-url)))
+    (or (null proxy)
+        (ytm-radio--http-proxy-url-p proxy))))
 
 (defun ytm-radio--mpv-ytdl-format-argument ()
   "Return the mpv ytdl format argument, or nil."
@@ -1509,7 +1535,8 @@ CONTEXT is optional browser metadata from the item that opened the detail."
 
 (defun ytm-radio--cached-stream-url (track)
   "Return a cached direct stream URL for TRACK, or nil."
-  (when-let* ((key (ytm-radio--stream-cache-key track))
+  (when-let* (((ytm-radio--direct-stream-cache-supported-p))
+              (key (ytm-radio--stream-cache-key track))
               (entry (gethash key ytm-radio--stream-url-cache)))
     (if (ytm-radio--stream-cache-entry-valid-p entry)
         (map-elt entry 'url)
@@ -1545,6 +1572,7 @@ CONTEXT is optional browser metadata from the item that opened the detail."
 (defun ytm-radio--stream-resolve-arguments (url)
   "Return yt-dlp arguments for resolving direct stream URL from URL."
   (append ytm-radio-yt-dlp-extra-args
+          (ytm-radio--yt-dlp-proxy-arguments)
           (list "--no-playlist")
           (when (and (stringp ytm-radio-mpv-ytdl-format)
                      (not (string-empty-p ytm-radio-mpv-ytdl-format)))
@@ -1635,6 +1663,7 @@ CONTEXT is optional browser metadata from the item that opened the detail."
 (defun ytm-radio--schedule-stream-prefetch (tracks)
   "Schedule background stream prefetch for TRACKS."
   (when (and (not noninteractive)
+             (ytm-radio--direct-stream-cache-supported-p)
              (integerp ytm-radio-stream-prefetch-limit)
              (> ytm-radio-stream-prefetch-limit 0))
     (dolist (track (seq-take tracks ytm-radio-stream-prefetch-limit))
@@ -1644,7 +1673,8 @@ CONTEXT is optional browser metadata from the item that opened the detail."
 (defun ytm-radio--mpv-arguments (socket url)
   "Return mpv arguments for SOCKET and media URL."
   (append ytm-radio-mpv-network-cache-args
-          (delq nil (list (ytm-radio--mpv-ytdl-format-argument)))
+          (delq nil (list (ytm-radio--mpv-ytdl-format-argument)
+                          (ytm-radio--mpv-http-proxy-argument)))
           ytm-radio-mpv-extra-args
           (delq nil (list (ytm-radio--mpv-raw-options-argument)
                           "--no-video"

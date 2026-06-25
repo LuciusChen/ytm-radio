@@ -68,6 +68,7 @@ struct Options {
     limit: usize,
     mock_data: bool,
     initial_only: bool,
+    proxy: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -106,6 +107,7 @@ where
     I::Item: Into<String>,
 {
     let options = parse_args(args)?;
+    let proxy = options.proxy.as_deref();
     let data = match &options.command {
         Command::AuthCheck => {
             let path = required_auth_path(&options)?;
@@ -154,6 +156,7 @@ where
                 &auth,
                 options.initial_only,
                 Some(&cache_path),
+                proxy,
             )?
         }
         Command::BrowseId { browse_id, .. } if options.mock_data => {
@@ -167,6 +170,7 @@ where
                 options.limit,
                 &auth,
                 Some(&cache_path),
+                proxy,
             )?
         }
         Command::Continuation { token } if options.mock_data => {
@@ -174,31 +178,31 @@ where
         }
         Command::Continuation { token } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            continuation(token, options.limit, &auth, Some(&cache_path))?
+            continuation(token, options.limit, &auth, Some(&cache_path), proxy)?
         }
         Command::Search { query } if options.mock_data => mock_search(query, options.limit),
         Command::Search { query } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            search(query, options.limit, &auth, Some(&cache_path))?
+            search(query, options.limit, &auth, Some(&cache_path), proxy)?
         }
         Command::Rate { video_id, rating } if options.mock_data => {
             json!({ "video-id": video_id, "rating": rating })
         }
         Command::Rate { video_id, rating } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            rate(video_id, rating, &auth, Some(&cache_path))?
+            rate(video_id, rating, &auth, Some(&cache_path), proxy)?
         }
         Command::Radio { video_id } if options.mock_data => mock_radio(video_id, options.limit),
         Command::Radio { video_id } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            radio(video_id, options.limit, &auth, Some(&cache_path))?
+            radio(video_id, options.limit, &auth, Some(&cache_path), proxy)?
         }
         Command::PlaylistOptions { video_id } if options.mock_data => {
             mock_playlist_options(video_id)
         }
         Command::PlaylistOptions { video_id } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            playlist_options(video_id, &auth, Some(&cache_path))?
+            playlist_options(video_id, &auth, Some(&cache_path), proxy)?
         }
         Command::AddToPlaylist {
             video_id,
@@ -211,7 +215,7 @@ where
             playlist_id,
         } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            add_to_playlist(video_id, playlist_id, &auth, Some(&cache_path))?
+            add_to_playlist(video_id, playlist_id, &auth, Some(&cache_path), proxy)?
         }
         Command::Library { video_id, action } if options.mock_data => {
             json!({
@@ -223,7 +227,7 @@ where
         }
         Command::Library { video_id, action } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
-            library(video_id, action, &auth, Some(&cache_path))?
+            library(video_id, action, &auth, Some(&cache_path), proxy)?
         }
     };
     serde_json::to_string(&Envelope {
@@ -286,6 +290,7 @@ where
     let mut initial_only = false;
     let mut timeout_secs = None;
     let mut restart_running = false;
+    let mut proxy = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -328,6 +333,13 @@ where
             }
             "--initial-only" => initial_only = true,
             "--restart-running" => restart_running = true,
+            "--proxy" => {
+                let value = option_value(&args, &mut index)?.trim();
+                if value.is_empty() {
+                    return Err("proxy URL must not be empty".to_string());
+                }
+                proxy = Some(value.to_string());
+            }
             other => return Err(format!("unknown option `{other}`")),
         }
         index += 1;
@@ -335,6 +347,9 @@ where
 
     let command = match command {
         Command::AuthLoginWindow { .. } => {
+            if proxy.is_some() {
+                return Err("proxy options require a YouTube Music request action".to_string());
+            }
             if browse_params.is_some() || initial_only || mock_data || auth_file.is_some() {
                 return Err("browse options require a browse action".to_string());
             }
@@ -380,6 +395,24 @@ where
             }
             Command::Browse(target)
         }
+        Command::AuthCheck => {
+            if proxy.is_some() {
+                return Err("proxy options require a YouTube Music request action".to_string());
+            }
+            if browser.is_some()
+                || output.is_some()
+                || port.is_some()
+                || profile_dir.is_some()
+                || timeout_secs.is_some()
+                || restart_running
+            {
+                return Err("auth options require an auth action".to_string());
+            }
+            if browse_params.is_some() || initial_only || mock_data {
+                return Err("browse options require a browse action".to_string());
+            }
+            Command::AuthCheck
+        }
         other => {
             if browser.is_some()
                 || output.is_some()
@@ -402,6 +435,7 @@ where
         limit,
         mock_data,
         initial_only,
+        proxy,
     })
 }
 
@@ -576,6 +610,9 @@ fn usage() -> String {
         "  ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --mock",
         "  ytm-radio-helper library VIDEO_ID toggle|save|remove --auth FILE",
         "  ytm-radio-helper library VIDEO_ID toggle|save|remove --mock",
+        "",
+        "options:",
+        "  --proxy URL  proxy YouTube Music request commands",
     ]
     .join("\n")
 }
@@ -1046,6 +1083,7 @@ mod tests {
                 limit: 2,
                 mock_data: true,
                 initial_only: false,
+                proxy: None,
             }
         );
     }
@@ -1062,6 +1100,7 @@ mod tests {
                 limit: 2,
                 mock_data: true,
                 initial_only: true,
+                proxy: None,
             }
         );
     }
@@ -1104,6 +1143,7 @@ mod tests {
                 limit: 5,
                 mock_data: true,
                 initial_only: false,
+                proxy: None,
             }
         );
     }
@@ -1134,8 +1174,29 @@ mod tests {
                 limit: 2,
                 mock_data: true,
                 initial_only: false,
+                proxy: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_proxy_for_request_commands() {
+        let options = parse_args([
+            "search",
+            "tokyo",
+            "--auth",
+            "/tmp/auth.json",
+            "--proxy",
+            "socks5h://127.0.0.1:7890",
+        ])
+        .unwrap();
+        assert_eq!(options.proxy, Some("socks5h://127.0.0.1:7890".to_string()));
+    }
+
+    #[test]
+    fn rejects_empty_proxy() {
+        let error = parse_args(["search", "tokyo", "--mock", "--proxy", " "]).unwrap_err();
+        assert_eq!(error, "proxy URL must not be empty".to_string());
     }
 
     #[test]
@@ -1151,7 +1212,25 @@ mod tests {
                 limit: 3,
                 mock_data: true,
                 initial_only: false,
+                proxy: None,
             }
+        );
+    }
+
+    #[test]
+    fn rejects_proxy_for_login_window() {
+        let error = parse_args([
+            "auth",
+            "login-window",
+            "--output",
+            "/tmp/ytm/auth.json",
+            "--proxy",
+            "http://127.0.0.1:8888",
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "proxy options require a YouTube Music request action".to_string()
         );
     }
 
@@ -1169,6 +1248,7 @@ mod tests {
                 limit: 100,
                 mock_data: true,
                 initial_only: false,
+                proxy: None,
             }
         );
     }

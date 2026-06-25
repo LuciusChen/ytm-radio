@@ -384,6 +384,22 @@ remains machine-readable JSON.
 - [ytmusicapi browser authentication](https://github.com/sigma67/ytmusicapi/blob/master/ytmusicapi/auth/browser.py)
 - [ytmusicapi browsing requests](https://github.com/sigma67/ytmusicapi/blob/master/ytmusicapi/mixins/browsing.py)
 
+## Proxy
+
+Set one proxy URL when YouTube Music requests should go through a proxy:
+
+```elisp
+(setq ytm-radio-proxy-url "socks5h://127.0.0.1:7890")
+```
+
+The proxy is passed to the Rust helper, `yt-dlp`, and mpv's ytdl hook. HTTP and
+HTTPS proxy URLs are also passed to mpv for direct media URL playback.
+
+The browser login window does not receive this setting. It uses the browser or
+system proxy configuration. When a SOCKS proxy is configured, ytm-radio avoids
+using cached direct media URLs because mpv's direct transport may not preserve
+SOCKS routing.
+
 ## URL Cookies
 
 These options are for `yt-dlp` media discovery and mpv playback only. They are
