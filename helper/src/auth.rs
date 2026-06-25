@@ -47,7 +47,7 @@ impl AuthConfig {
         }
         if self.source.kind != "login-window" {
             return Err(
-                "unsupported auth source; run auth login-window or M-x ytm-radio-login".to_string(),
+                "unsupported auth source; rerun ytm-radio or use auth login-window".to_string(),
             );
         }
         let cookie = self
@@ -1290,7 +1290,7 @@ mod tests {
         }))
         .unwrap();
         let error = config.validate().unwrap_err();
-        assert!(error.contains("ytm-radio-login"));
+        assert!(error.contains("auth login-window"));
     }
 
     #[test]

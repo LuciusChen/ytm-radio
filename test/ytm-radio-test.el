@@ -285,6 +285,80 @@
       (should (= (map-elt ytm-radio--player :duration) 200))
       (should (equal scheduled (list track-c))))))
 
+(ert-deftest ytm-radio-mpv-error-retries-cached-stream-with-original-url ()
+  "Recover from a bad cached stream URL by retrying the original URL once."
+  (let* ((ytm-radio--stream-url-cache (make-hash-table :test #'equal))
+         (track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Song"
+                 :url "https://music.youtube.com/watch?v=v1"))
+         (ytm-radio--state (ytm-radio--make-state))
+         (ytm-radio--player
+          (ytm-radio--make-player
+           :status 'playing
+           :current-track track
+           :process 'mpv-process
+           :ipc-process 'mpv-ipc
+           :playback-url "https://rr.example/bad"
+           :using-stream-cache t))
+         commands)
+    (puthash "v1"
+             (list (cons 'url "https://rr.example/bad")
+                   (cons 'expires 9999999999))
+             ytm-radio--stream-url-cache)
+    (cl-letf (((symbol-function 'process-live-p)
+               (lambda (process) (memq process '(mpv-process mpv-ipc))))
+              ((symbol-function 'ytm-radio--mpv-send)
+               (lambda (command) (push command commands)))
+              ((symbol-function 'ytm-radio--render) #'ignore)
+              ((symbol-function 'ytm-radio--show-now-playing) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (ytm-radio--mpv-event
+       "end-file"
+       '((reason . "error")
+         (file_error . "unrecognized file format")))
+      (should-not (gethash "v1" ytm-radio--stream-url-cache))
+      (should (member '("loadfile"
+                        "https://music.youtube.com/watch?v=v1"
+                        "replace")
+                      commands))
+      (should (eq (map-elt ytm-radio--player :status) 'loading))
+      (should-not (map-elt ytm-radio--player :using-stream-cache))
+      (should (map-elt ytm-radio--player :retried-original-url)))))
+
+(ert-deftest ytm-radio-mpv-sentinel-retries-cache-before-ipc ()
+  "Recover when a cached stream fails before the mpv IPC connection is ready."
+  (let* ((ytm-radio--stream-url-cache (make-hash-table :test #'equal))
+         (track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Song"
+                 :url "https://music.youtube.com/watch?v=v1"))
+         (ytm-radio--state (ytm-radio--make-state))
+         (ytm-radio--player
+          (ytm-radio--make-player
+           :status 'loading
+           :current-track track
+           :process 'mpv-process
+           :playback-url "https://rr.example/bad"
+           :using-stream-cache t))
+         retried-track
+         stopped)
+    (puthash "v1"
+             (list (cons 'url "https://rr.example/bad")
+                   (cons 'expires 9999999999))
+             ytm-radio--stream-url-cache)
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_process) nil))
+              ((symbol-function 'process-exit-status) (lambda (_process) 2))
+              ((symbol-function 'ytm-radio--stop-process)
+               (lambda () (setq stopped t)))
+              ((symbol-function 'ytm-radio--play-track)
+               (lambda (track) (setq retried-track track)))
+              ((symbol-function 'message) #'ignore))
+      (ytm-radio--mpv-sentinel 'mpv-process "exited")
+      (should stopped)
+      (should (equal retried-track track))
+      (should-not (gethash "v1" ytm-radio--stream-url-cache)))))
+
 (ert-deftest ytm-radio-render-explains-empty-catalog ()
   "Render an empty catalog with next-step guidance."
   (let ((ytm-radio--state (ytm-radio--make-state))
@@ -311,8 +385,29 @@
                "Add a URL, or import your YouTube Music library/home"
                (buffer-string)))
       (should (string-match-p
-               "YouTube Music login opens automatically when needed"
-               (buffer-string))))))
+	               "YouTube Music login opens automatically when needed"
+	               (buffer-string))))))
+
+(ert-deftest ytm-radio-browser-header-omits-detail-context ()
+  "Keep detail titles out of the header line."
+  (let ((ytm-radio--browser-view
+         (list (cons :kind 'detail)
+               (cons :title "Album"))))
+    (let ((header (substring-no-properties
+                   (ytm-radio--browser-header-line))))
+      (should (string-match-p "Home[[:space:]]+Explore[[:space:]]+Library"
+                              header))
+      (should-not (string-match-p "Album" header)))))
+
+(ert-deftest ytm-radio-browser-header-highlights-detail-origin ()
+  "Highlight the root view that opened a detail view."
+  (let ((ytm-radio--browser-view
+         (list (cons :kind 'detail)
+               (cons :origin-view 'library)
+               (cons :title "Album"))))
+    (should (ytm-radio--browser-root-active-p 'library))
+    (should-not (ytm-radio--browser-root-active-p 'home))
+    (should-not (ytm-radio--browser-root-active-p 'explore))))
 
 (ert-deftest ytm-radio-open-uses-cached-home-without-refresh ()
   "Use cached Home sources on first browser open without refreshing."
@@ -386,37 +481,6 @@
             (should (equal captured-output auth-file))
             (should (functionp captured-continuation))))
       (delete-directory directory t))))
-
-(ert-deftest ytm-radio-migrates-legacy-runtime-files ()
-  "Copy default runtime files out of `user-emacs-directory'."
-  (let* ((root (make-temp-file "ytm-radio-test-" t))
-         (user-emacs-directory
-          (file-name-as-directory (expand-file-name "emacs" root)))
-         (legacy-directory (expand-file-name "ytm-radio/" user-emacs-directory))
-         (ytm-radio-data-directory (expand-file-name "data/" root))
-         (ytm-radio-state-file
-          (expand-file-name "state.eld" ytm-radio-data-directory))
-         (ytm-radio-helper-auth-file
-          (expand-file-name "auth.json" ytm-radio-data-directory)))
-    (unwind-protect
-        (progn
-          (make-directory legacy-directory t)
-          (with-temp-file (expand-file-name "state.eld" legacy-directory)
-            (insert "state"))
-          (with-temp-file (expand-file-name "auth.json" legacy-directory)
-            (insert "auth"))
-          (ytm-radio--migrate-legacy-runtime-files)
-          (should (file-exists-p ytm-radio-state-file))
-          (should (file-exists-p ytm-radio-helper-auth-file))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents ytm-radio-state-file)
-                           (buffer-string))
-                         "state"))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents ytm-radio-helper-auth-file)
-                           (buffer-string))
-                         "auth")))
-      (delete-directory root t))))
 
 (ert-deftest ytm-radio-render-shows-non-track-items ()
   "Render albums, playlists, and other non-track items in the browser buffer."
@@ -664,6 +728,59 @@
       (ytm-radio--select-browser-view 'library)
       (should (equal started '("library" "library" library))))))
 
+(ert-deftest ytm-radio-search-loads-asynchronously ()
+  "Run YouTube Music search through the async helper path."
+  (let* ((source (ytm-radio--make-source
+                  :id "ytm:search:30:1:songs"
+                  :kind 'youtube-music-search-section
+                  :title "Songs"
+                  :url "https://music.youtube.com/search?q=30"
+                  :items nil
+                  :tracks nil))
+         (ytm-radio-helper-use-mock-data t)
+         (ytm-radio-helper-auth-file nil)
+         (ytm-radio-helper-library-limit 12)
+         (ytm-radio--state (ytm-radio--make-state))
+         (ytm-radio--player (ytm-radio--make-player))
+         (ytm-radio--loaded t)
+         (ytm-radio--browser-view 'home)
+         (ytm-radio--browser-load-process nil)
+         captured-arguments)
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'ytm-radio--call-helper-async)
+               (lambda (arguments success _error-callback)
+                 (setq captured-arguments arguments)
+                 (funcall success 'data)
+                 nil))
+              ((symbol-function 'ytm-radio--helper-sources)
+               (lambda (_data) (list source)))
+              ((symbol-function 'ytm-radio--save) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (ytm-radio-search "30")
+      (should (equal captured-arguments
+                     '("search" "30" "--mock" "--limit" "12")))
+      (should (eq (ytm-radio--view-kind) 'search))
+      (should (ytm-radio--source "ytm:search:30:1:songs"))
+      (should-not ytm-radio--browser-load-process)
+      (should-not ytm-radio--browser-loading-message))))
+
+(ert-deftest ytm-radio-liked-import-uses-async-target-loader ()
+  "Import liked songs through the shared async target loader."
+  (let ((ytm-radio--state (ytm-radio--make-state))
+        (ytm-radio--player (ytm-radio--make-player))
+        (ytm-radio--loaded t)
+        captured)
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'ytm-radio--start-helper-target-load)
+               (lambda (target label view)
+                 (setq captured (list target label view)))))
+      (ytm-radio-import-ytmusic-liked)
+      (should (equal captured '("liked" "liked songs" library))))))
+
 (ert-deftest ytm-radio-render-shows-detail-header-metadata ()
   "Render detail header sources with thumbnail metadata and subtitle."
   (let* ((source (ytm-radio--make-source
@@ -694,8 +811,370 @@
       (should (string-match-p "1.2K subscribers" (buffer-string)))
       (should-not (string-match-p "0 items / 0 tracks" (buffer-string))))))
 
-(ert-deftest ytm-radio-detail-header-can-use-background-image ()
-  "Render detail header metadata as an image-backed header when available."
+(ert-deftest ytm-radio-detail-header-can-use-cover-slices ()
+  "Render detail header metadata beside a sliced cover when available."
+  (let* ((source (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1:header"
+                  :kind 'youtube-music-album
+                  :title "Smoke Rings"
+                  :url "https://music.youtube.com/browse/MPRE1"
+                  :tracks nil
+                  :items nil
+                  :subtitle "Album - Kolisnik & LoFi Beats"
+                  :thumbnail-url "https://example.com/cover.jpg")))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
+                 (lambda (_source) (list 'cover-image 90 10 3)))
+                ((symbol-function 'ytm-radio--detail-view-tracks)
+                 (lambda () nil)))
+        (ytm-radio--insert-source-header source))
+      (should (string-match-p "Smoke Rings" (buffer-string)))
+      (should (string-match-p "Album • Kolisnik & LoFi Beats"
+                              (buffer-string)))
+      (goto-char (point-min))
+      (let (display)
+        (while (and (not display) (< (point) (point-max)))
+          (setq display (get-text-property (point) 'display))
+          (forward-char 1))
+        (should (equal display '((slice 0 0 1.0 10) cover-image)))))))
+
+(ert-deftest ytm-radio-detail-header-cover-slices-overlap ()
+  "Overlap adjacent detail header cover slices to avoid row gaps."
+  (let ((cover (list 'cover-image 90 10 3)))
+    (should (equal (get-text-property
+                    0 'display
+                    (ytm-radio--detail-header-cover-slice cover 0))
+                   '((slice 0 0 1.0 10) cover-image)))
+    (should (equal (get-text-property
+                    0 'display
+                    (ytm-radio--detail-header-cover-slice cover 1))
+                   '((slice 0 9 1.0 10) cover-image)))))
+
+(ert-deftest ytm-radio-detail-header-rows-use-cover-line-height ()
+  "Keep sliced detail cover rows at the same height as their newlines."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:header"
+                 :kind 'youtube-music-album
+                 :title "Smoke Rings"
+                 :subtitle "Album - Kolisnik & LoFi Beats")))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
+                 (lambda (_source) (list 'cover-image 90 10 3)))
+                ((symbol-function 'ytm-radio--detail-view-tracks)
+                 (lambda () nil)))
+        (ytm-radio--insert-source-header source t))
+      (let (line-heights)
+        (goto-char (point-min))
+        (while (search-forward "\n" nil t)
+          (push (get-text-property (1- (point)) 'line-height)
+                line-heights))
+        (should (equal (seq-filter #'identity (nreverse line-heights))
+                       '((10 . 10) (10 . 10) (10 . 10))))))))
+
+(ert-deftest ytm-radio-album-playlist-detail-headers-use-square-layout ()
+  "Use square detail covers for album and playlist headers only."
+  (let ((album (ytm-radio--make-source
+                :id "ytm:browse:MPRE1:header"
+                :kind 'youtube-music-album
+                :title "Album"))
+        (playlist (ytm-radio--make-source
+                   :id "ytm:browse:VLPL1:header"
+                   :kind 'youtube-music-playlist
+                   :title "Playlist"))
+        (detail (ytm-radio--make-source
+                 :id "ytm:browse:detail:header"
+                 :kind 'youtube-music-detail
+                 :title "Detail")))
+    (should (ytm-radio--source-square-header-p album))
+    (should (ytm-radio--source-square-header-p playlist))
+    (should-not (ytm-radio--source-square-header-p detail))))
+
+(ert-deftest ytm-radio-playlist-detail-header-uses-placeholder-cover ()
+  "Render a square placeholder cover for playlist headers without artwork."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:VLPL1:header"
+                 :kind 'youtube-music-playlist
+                 :title "Lofi Loft"
+                 :subtitle "Playlist - Evil Needle")))
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _display) t))
+              ((symbol-function 'ytm-radio--svg-detail-header-placeholder-image)
+               (lambda (_source) 'placeholder-cover)))
+      (let ((cover (ytm-radio--source-header-cover-image source)))
+        (should (equal (car cover) 'placeholder-cover))
+        (should (= (nth 1 cover) (ytm-radio--detail-header-cover-size)))))))
+
+(ert-deftest ytm-radio-album-detail-header-renders-title-only-header ()
+  "Render album headers with real titles even when metadata is missing."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:header"
+                 :kind 'youtube-music-album
+                 :title "Smoke Rings"
+                 :items nil
+                 :tracks nil)))
+    (should (ytm-radio--source-header-p source))
+    (should-not (ytm-radio--empty-detail-header-p source))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
+                 (lambda (_source) (list 'cover-image 90 10 3)))
+                ((symbol-function 'ytm-radio--detail-view-tracks)
+                 (lambda () nil)))
+        (ytm-radio--insert-source-header source t))
+      (should (string-match-p "Smoke Rings" (buffer-string))))))
+
+(ert-deftest ytm-radio-album-detail-header-uses-opening-item-context ()
+  "Use the opening album item metadata to enrich the detail header."
+  (let* ((item '((type . "album")
+                 (title . "Smoke Rings")
+                 (subtitle . "Album - 2026")
+                 (thumbnail-url . "https://example.com/smoke-rings.jpg")))
+         (source (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1:header"
+                  :kind 'youtube-music-album
+                  :title "Smoke Rings"
+                  :items nil
+                  :tracks nil))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :context item))))
+    (should (equal (ytm-radio--source-thumbnail-url source)
+                   "https://example.com/smoke-rings.jpg"))
+    (should (equal (ytm-radio--source-subtitle source)
+                   "Album • 2026"))))
+
+(ert-deftest ytm-radio-browse-detail-sources-adds-context-header ()
+  "Add a synthetic album/playlist header for single-source detail results."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Whiskey On My Mind"
+                 :url "https://music.youtube.com/watch?v=v1"
+                 :duration 314))
+         (source (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1"
+                  :kind 'youtube-music-album
+                  :title "Smoke Rings"
+                  :url "https://music.youtube.com/browse/MPRE1"
+                  :items (list track)
+                  :tracks (list track)))
+         (item '((type . "album")
+                 (title . "Smoke Rings")
+                 (subtitle . "Album - 2026")
+                 (thumbnail-url . "https://example.com/smoke-rings.jpg")
+                 (url . "https://music.youtube.com/browse/MPRE1")))
+         (sources (ytm-radio--browse-detail-sources (list source) item))
+         (header (car sources)))
+    (should (= (length sources) 2))
+    (should (eq (map-elt header :kind) 'youtube-music-album))
+    (should (equal (map-elt header :id) "ytm:browse:MPRE1:header"))
+    (should (equal (map-elt header :title) "Smoke Rings"))
+    (should (equal (map-elt header :subtitle) "Album - 2026"))
+    (should (equal (map-elt header :thumbnail-url)
+                   "https://example.com/smoke-rings.jpg"))
+    (should (eq (cadr sources) source))))
+
+(ert-deftest ytm-radio-browse-detail-sources-enriches-existing-header ()
+  "Use opening item metadata when the helper returns a generic detail header."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Someone Like You"
+                 :url "https://music.youtube.com/watch?v=v1"
+                 :duration 286))
+         (header (ytm-radio--make-source
+                  :id "ytm:browse:VLPL1:header"
+                  :kind 'youtube-music-playlist
+                  :title "Playlist"
+                  :items nil
+                  :tracks nil))
+         (songs (ytm-radio--make-source
+                 :id "ytm:browse:VLPL1:1:songs"
+                 :kind 'youtube-music-detail-section
+                 :title "Songs"
+                 :items (list track)
+                 :tracks (list track)))
+         (item '((type . "playlist")
+                 (title . "Adele Mix")
+                 (subtitle . "Playlist - YouTube Music")
+                 (browse-id . "VLPL1")
+                 (thumbnail-url . "https://example.com/adele-mix.jpg")))
+         (sources (ytm-radio--browse-detail-sources (list header songs) item))
+         (enriched (car sources)))
+    (should (= (length sources) 2))
+    (should (equal (map-elt enriched :id) "ytm:browse:VLPL1:header"))
+    (should (eq (map-elt enriched :kind) 'youtube-music-playlist))
+    (should (equal (map-elt enriched :title) "Adele Mix"))
+    (should (equal (map-elt enriched :subtitle) "Playlist - YouTube Music"))
+    (should (equal (map-elt enriched :thumbnail-url)
+                   "https://example.com/adele-mix.jpg"))
+    (should (eq (cadr sources) songs))))
+
+(ert-deftest ytm-radio-item-detail-header-kind-prefers-browse-id ()
+  "Classify album-like playlist cards by their browse id."
+  (should (eq (ytm-radio--item-detail-header-kind
+               '((type . "playlist")
+                 (browse-id . "MPREb_album")
+                 (title . "30")))
+              'youtube-music-album))
+  (should (eq (ytm-radio--item-detail-header-kind
+               '((type . "playlist")
+                 (browse-id . "VLPL1")
+                 (title . "Mix")))
+              'youtube-music-playlist)))
+
+(ert-deftest ytm-radio-headingless-detail-source-requires-visible-header ()
+  "Keep the content heading when the sibling detail header is not renderable."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Someone Like You"
+                 :url "https://music.youtube.com/watch?v=v1"))
+         (content (ytm-radio--make-source
+                   :id "ytm:browse:VLPL1"
+                   :kind 'youtube-music-playlist
+                   :title "Playlist"
+                   :items (list track)
+                   :tracks (list track)))
+         (empty-header (ytm-radio--make-source
+                        :id "ytm:browse:VLPL1:header"
+                        :kind 'youtube-music-playlist
+                        :title "Playlist"
+                        :items nil
+                        :tracks nil))
+         (visible-header (ytm-radio--make-source
+                          :id "ytm:browse:VLPL1:header"
+                          :kind 'youtube-music-playlist
+                          :title "Adele Mix"
+                          :items nil
+                          :tracks nil))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :source-ids '("ytm:browse:VLPL1:header"
+                                    "ytm:browse:VLPL1")))))
+    (let ((ytm-radio--state
+           (ytm-radio--make-state
+            :sources (list (cons (map-elt empty-header :id) empty-header)
+                           (cons (map-elt content :id) content)))))
+      (should-not (ytm-radio--headingless-detail-source-p content)))
+    (let ((ytm-radio--state
+           (ytm-radio--make-state
+            :sources (list (cons (map-elt visible-header :id) visible-header)
+                           (cons (map-elt content :id) content)))))
+      (should (ytm-radio--headingless-detail-source-p content)))))
+
+(ert-deftest ytm-radio-synthetic-album-header-renders-before-single-source ()
+  "Render the synthesized album header before the single returned source."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Whiskey On My Mind"
+                 :url "https://music.youtube.com/watch?v=v1"
+                 :duration 314))
+         (source (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1"
+                  :kind 'youtube-music-album
+                  :title "Smoke Rings"
+                  :url "https://music.youtube.com/browse/MPRE1"
+                  :items (list track)
+                  :tracks (list track)))
+         (item '((type . "album")
+                 (title . "Smoke Rings")
+                 (subtitle . "Album - 2026")
+                 (thumbnail-url . "https://example.com/smoke-rings.jpg")))
+         (sources (ytm-radio--browse-detail-sources (list source) item))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :source-ids (mapcar (lambda (source)
+                                             (map-elt source :id))
+                                           sources))
+                (cons :context item)
+                (cons :title "Smoke Rings")))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (mapcar (lambda (source)
+                              (cons (map-elt source :id) source))
+                            sources)))
+         (ytm-radio--player (ytm-radio--make-player)))
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
+               (lambda (_source) (list 'cover-image 90 10 3))))
+      (ytm-radio--render))
+    (with-current-buffer "*ytm-radio*"
+      (let ((contents (buffer-string)))
+        (should (string-match-p "Smoke Rings" contents))
+        (should (string-match-p "Album • 2026" contents))
+        (should (string-match-p "1 song • 5 minutes" contents))
+        (should (string-match-p "Whiskey On My Mind" contents))
+        (should-not (string-match-p "Smoke Rings[[:space:]]+1 track"
+                                    contents))))))
+
+(ert-deftest ytm-radio-album-detail-header-summary-is-youtube-like ()
+  "Format album and playlist detail summaries like YouTube Music."
+  (let* ((track-a (ytm-radio--make-track
+                   :id "a"
+                   :title "A"
+                   :url "https://music.youtube.com/watch?v=a"
+                   :duration 3600))
+         (track-b (ytm-radio--make-track
+                   :id "b"
+                   :title "B"
+                   :url "https://music.youtube.com/watch?v=b"
+                   :duration 2580))
+         (header (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1:header"
+                  :kind 'youtube-music-album
+                  :title "Smoke Rings"
+                  :items nil
+                  :tracks nil))
+         (songs (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:1:songs"
+                 :kind 'youtube-music-detail-section
+                 :title "Songs"
+                 :items (list track-a track-b)
+                 :tracks (list track-a track-b)))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :source-ids (list (map-elt header :id)
+                                        (map-elt songs :id)))))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (list (cons (map-elt header :id) header)
+                          (cons (map-elt songs :id) songs)))))
+    (should (equal (ytm-radio--detail-header-summary header)
+                   "2 songs • 1 hour, 43 minutes"))))
+
+(ert-deftest ytm-radio-playlist-detail-header-summary-keeps-item-track-split ()
+  "Preserve item and track counts when playlist detail contains both."
+  (let* ((track (ytm-radio--make-track
+                 :id "a"
+                 :title "A"
+                 :url "https://music.youtube.com/watch?v=a"
+                 :duration 286))
+         (non-track '((type . "item")
+                      (title . "Shuffle all")))
+         (header (ytm-radio--make-source
+                  :id "ytm:browse:VLPL1:header"
+                  :kind 'youtube-music-playlist
+                  :title "Adele Mix"
+                  :items nil
+                  :tracks nil))
+         (songs (ytm-radio--make-source
+                 :id "ytm:browse:VLPL1"
+                 :kind 'youtube-music-playlist
+                 :title "Playlist"
+                 :items (list non-track track)
+                 :tracks (list track)))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :source-ids (list (map-elt header :id)
+                                        (map-elt songs :id)))))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (list (cons (map-elt header :id) header)
+                          (cons (map-elt songs :id) songs)))))
+    (should (equal (ytm-radio--detail-header-summary header)
+                   "2 items / 1 track • 4 minutes"))))
+
+(ert-deftest ytm-radio-artist-detail-header-prefers-banner-image ()
+  "Render artist detail headers as a wide banner instead of a square cover."
   (let* ((source (ytm-radio--make-source
                   :id "ytm:browse:UC1:header"
                   :kind 'youtube-music-artist
@@ -703,26 +1182,93 @@
                   :url "https://music.youtube.com/browse/UC1"
                   :tracks nil
                   :items nil
-                  :subtitle "1.2K subscribers"
-                  :thumbnail-url "https://example.com/avatar.jpg"))
-         (image '(image :type svg :data "<svg/>")))
+                  :subtitle "448K monthly audience"
+                  :thumbnail-url "https://example.com/banner.jpg")))
     (with-temp-buffer
-      (cl-letf (((symbol-function 'ytm-radio--source-header-background-image)
-                 (lambda (_source) image)))
-        (ytm-radio--insert-source-header source))
+      (cl-letf (((symbol-function 'ytm-radio--source-header-banner-image)
+                 (lambda (_source _title _subtitle _summary) 'banner-image))
+                ((symbol-function 'ytm-radio--source-header-cover-image)
+                 (lambda (_source) (list 'cover-image 90 10 3)))
+                ((symbol-function 'ytm-radio--detail-view-tracks)
+                 (lambda () nil)))
+        (ytm-radio--insert-source-header source t))
       (should (string-match-p "Chill girl Vibes" (buffer-string)))
-      (should (string-match-p "1.2K subscribers" (buffer-string)))
+      (should (string-match-p "448K monthly audience" (buffer-string)))
       (goto-char (point-min))
-      (search-forward "Chill girl Vibes")
-      (should (equal (get-text-property (match-beginning 0) 'display)
-                     image)))))
+      (should (equal (get-text-property (point) 'display) 'banner-image)))))
 
-(ert-deftest ytm-radio-detail-header-layout-covers-header-area ()
-  "Scale detail header covers to fill the fixed header area."
-  (should (equal (ytm-radio--fill-rect 400 400 800 176)
-                 '(800 800 0 -312)))
-  (should (equal (ytm-radio--fill-rect 1600 900 800 176)
-                 '(800 450 0 -137))))
+(ert-deftest ytm-radio-detail-header-summary-uses-detail-tracks ()
+  "Summarize tracks from the full detail view, not the header source."
+  (let* ((track-a (ytm-radio--make-track
+                   :id "a"
+                   :title "A"
+                   :url "https://music.youtube.com/watch?v=a"
+                   :duration 60))
+         (track-b (ytm-radio--make-track
+                   :id "b"
+                   :title "B"
+                   :url "https://music.youtube.com/watch?v=b"
+                   :duration 125))
+         (header (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1:header"
+                  :kind 'youtube-music-album
+                  :title "Album"
+                  :items nil
+                  :tracks nil
+                  :subtitle "Album - Artist"))
+         (songs (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:1:songs"
+                 :kind 'youtube-music-detail-section
+                 :title "Songs"
+                 :items (list track-a track-b)
+                 :tracks (list track-a track-b)))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :source-ids (list (map-elt header :id)
+                                        (map-elt songs :id)))))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (list (cons (map-elt header :id) header)
+                          (cons (map-elt songs :id) songs))))
+         (ytm-radio--player (ytm-radio--make-player)))
+    (should (equal (ytm-radio--detail-view-summary)
+                   "2 tracks - 3m"))))
+
+(ert-deftest ytm-radio-detail-view-hides-empty-header-and-generic-section-title ()
+  "Do not render empty detail headers or internal fallback section titles."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Nella Fantasia"
+                 :url "https://music.youtube.com/watch?v=v1"))
+         (header (ytm-radio--make-source
+                  :id "ytm:browse:MPRE1:header"
+                  :kind 'youtube-music-album
+                  :title "Album"
+                  :items nil
+                  :tracks nil))
+         (songs (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:1:home-section-1"
+                 :kind 'youtube-music-detail-section
+                 :title "Home section 1"
+                 :items (list track)
+                 :tracks (list track)))
+         (ytm-radio--browser-view
+          (list (cons :kind 'detail)
+                (cons :source-ids (list (map-elt header :id)
+                                        (map-elt songs :id)))))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (list (cons (map-elt header :id) header)
+                          (cons (map-elt songs :id) songs))))
+         (ytm-radio--player (ytm-radio--make-player)))
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (ytm-radio--render)
+    (with-current-buffer "*ytm-radio*"
+      (should (string-match-p "Nella Fantasia" (buffer-string)))
+      (should-not (string-match-p "Album[[:space:]]+0 tracks" (buffer-string)))
+      (should-not (string-match-p "Home section 1" (buffer-string))))))
 
 (ert-deftest ytm-radio-detail-prefix-matches-item-prefix-width ()
   "Render title and detail prefixes to the same width."
@@ -978,6 +1524,24 @@
       (search-forward "||")
       (should (button-at (1- (point)))))))
 
+(ert-deftest ytm-radio-playback-status-does-not-rerender-browser ()
+  "Keep browser content stable when mpv reports play/pause status changes."
+  (let ((ytm-radio--player (ytm-radio--make-player :status 'playing))
+        (browser-rendered nil)
+        (now-playing-rendered nil))
+    (cl-letf (((symbol-function 'ytm-radio--render-browser)
+               (lambda (&optional _reset-point)
+                 (setq browser-rendered t)))
+              ((symbol-function 'ytm-radio--render-now-playing-without-fit)
+               (lambda ()
+                 (setq now-playing-rendered t))))
+      (ytm-radio--mpv-event
+       "property-change"
+       '((name . "pause") (data . t)))
+      (should (eq (map-elt ytm-radio--player :status) 'paused))
+      (should now-playing-rendered)
+      (should-not browser-rendered))))
+
 (ert-deftest ytm-radio-now-playing-controls-include-playback-modes ()
   "Render repeat and shuffle in the compact now-playing controls."
   (let ((ytm-radio--player
@@ -1104,11 +1668,6 @@
       (ytm-radio-toggle-shuffle)
       (should-not (map-elt ytm-radio--player :shuffle)))))
 
-(ert-deftest ytm-radio-repeat-mode-treats-legacy-list-as-all ()
-  "Treat the old repeat list value as repeat all."
-  (let ((ytm-radio--player (ytm-radio--make-player :repeat 'list)))
-    (should (eq (ytm-radio--repeat-mode) 'all))))
-
 (ert-deftest ytm-radio-next-track-honors-repeat-and-shuffle ()
   "Choose next tracks using repeat and shuffle state."
   (let* ((track-a (ytm-radio--make-track
@@ -1232,8 +1791,8 @@
       (ytm-radio--set-playback-property :position 1.8)
       (should-not ytm-radio--progress-render-timer))))
 
-(ert-deftest ytm-radio-helper-json-ignores-success-stderr ()
-  "Parse helper stdout JSON while ignoring successful stderr diagnostics."
+(ert-deftest ytm-radio-json-process-ignores-success-stderr ()
+  "Parse process stdout JSON while ignoring successful stderr diagnostics."
   (let ((script-file (make-temp-file "ytm-radio-helper-" nil ".sh")))
     (unwind-protect
         (progn
@@ -1244,11 +1803,17 @@
             (insert "printf '%s\\n' 'diagnostic' >&2\n"))
           (set-file-modes script-file #o700)
           (let ((ytm-radio-helper-command script-file))
-            (should
-             (equal
-              (ytm-radio--helper-envelope-data
-               (ytm-radio--call-helper nil))
-              '((sources . nil))))))
+            (let ((result
+                   (ytm-radio--call-json-process
+                    ytm-radio-helper-command
+                    nil
+                    (lambda (diagnostic)
+                      (user-error "failed: %s" diagnostic)))))
+              (should (equal result
+                             '((ok . t)
+                               (schema . 1)
+                               (data (sources))
+                               (warnings)))))))
       (delete-file script-file))))
 
 (ert-deftest ytm-radio-doctor-report-checks-local-setup ()
@@ -1429,6 +1994,74 @@
     (should (equal (ytm-radio--item-thumbnail-url track)
                    "https://i.ytimg.com/vi/abc_123/hqdefault.jpg"))))
 
+(ert-deftest ytm-radio-item-detail-filters-menu-actions ()
+  "Do not render YouTube Music menu actions as item metadata."
+  (should (equal (ytm-radio--item-detail
+                  '((type . "album")
+                    (title . "30")
+                    (subtitle . "Album - Adele - Shuffle play - Start mix - Album added to queue - Save album to library - Remove album from library - Album will play next - Play next")))
+                 "Album - Adele"))
+  (should (equal (ytm-radio--item-detail
+                  '((type . "playlist")
+                    (title . "Lofi Loft")
+                    (subtitle . "Playlist - Evil Needle - Playlist added to queue - Save playlist to library - Remove playlist from library - Save to playlist - Playlist will play next - Play next")))
+                 "Playlist - Evil Needle"))
+  (should (string-empty-p
+           (ytm-radio--item-detail
+            '((type . "playlist")
+              (title . "Lofi Loft")
+              (subtitle . "Shuffle play - Start mix - Playlist will play next - Play next"))))))
+
+(ert-deftest ytm-radio-source-subtitle-filters-menu-actions ()
+  "Do not render YouTube Music menu actions as source metadata."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:header"
+                 :kind 'youtube-music-album
+                 :title "Album"
+                 :subtitle "Album - Artist - Album added to queue - Save album to library - Remove album from library")))
+    (should (equal (ytm-radio--source-subtitle source)
+                   "Album • Artist"))))
+
+(ert-deftest ytm-radio-source-subtitle-filters-header-actions ()
+  "Do not render YouTube Music header controls as source metadata."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:UC1:header"
+                 :kind 'youtube-music-artist
+                 :title "Chill girl Vibes"
+                 :subtitle "448K monthly audience - More - Less - Mix - Subscribe - Unsubscribe - Unsubscribe from - ? - 85")))
+    (should (equal (ytm-radio--source-subtitle source)
+                   "448K monthly audience"))))
+
+(ert-deftest ytm-radio-item-metadata-renders-clickable-browse-tokens ()
+  "Render structured item metadata as browse buttons."
+  (let* ((source (ytm-radio--make-source
+                  :id "source"
+                  :kind 'youtube-music-home-section
+                  :title "Home"))
+         (metadata (list '((text . "Album"))
+                         '((text . " - Kolisnik")
+                           (browse-id . "UCKOL")
+                           (browse-params . "artist-params"))
+                         '((text . " & "))
+                         '((text . "LoFi Beats")
+                           (browse-id . "UCLOFI"))))
+         (item `((type . "album")
+                 (title . "Smoke Rings")
+                 (metadata . ,metadata)))
+         opened)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'ytm-radio--item-thumbnail-image)
+                 (lambda (_item) nil))
+                ((symbol-function 'ytm-radio--open-browse-id-as-source)
+                 (lambda (browse-id &optional params)
+                   (setq opened (cons browse-id params)))))
+        (ytm-radio--insert-source-item source item 1)
+        (goto-char (point-min))
+        (search-forward "Kolisnik")
+        (should (button-at (1- (point))))
+        (push-button (1- (point)))
+        (should (equal opened '("UCKOL" . "artist-params")))))))
+
 (ert-deftest ytm-radio-helper-episode-items-are-playable ()
   "Treat helper podcast episodes as playable items."
   (let* ((source (ytm-radio--source-from-helper
@@ -1446,6 +2079,14 @@
                (lambda (_name fallback) fallback)))
       (should (equal (ytm-radio--item-type-label '((type . "podcast"))) "POD"))
       (should (equal (ytm-radio--item-type-label '((type . "episode"))) "EP")))))
+
+(ert-deftest ytm-radio-source-display-title-hides-internal-browse-ids ()
+  "Do not show YouTube Music internal browse ids as source titles."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:VLPL0xLD9YNV927g2-XOMbe9AXto5UDYR-Ff:header"
+                 :kind 'youtube-music-playlist
+                 :title "VLPL0xLD9YNV927g2-XOMbe9AXto5UDYR-Ff")))
+    (should (equal (ytm-radio--source-display-title source) "Playlist"))))
 
 (ert-deftest ytm-radio-helper-browse-arguments-include-limit-and-mock ()
   "Build Rust helper arguments for library imports."
@@ -1567,17 +2208,20 @@
                 (url . "https://music.youtube.com/playlist?list=PL1")))
         called-browse-id
         called-params
+        called-context
         fetched-url)
     (cl-letf (((symbol-function 'ytm-radio--open-browse-id-as-source)
-               (lambda (browse-id &optional params)
+               (lambda (browse-id &optional params context)
                  (setq called-browse-id browse-id)
-                 (setq called-params params)))
+                 (setq called-params params)
+                 (setq called-context context)))
               ((symbol-function 'ytm-radio--open-url-as-source)
                (lambda (url)
                  (setq fetched-url url))))
       (ytm-radio--open-item source item)
       (should (equal called-browse-id "VLPL1"))
       (should-not called-params)
+      (should (eq called-context item))
       (should-not fetched-url))))
 
 (ert-deftest ytm-radio-open-browse-id-enters-detail-view-for-sections ()
@@ -1598,17 +2242,138 @@
                  :tracks nil))
          (ytm-radio-helper-use-mock-data t)
          (ytm-radio--state (ytm-radio--make-state))
-         (ytm-radio--player (ytm-radio--make-player)))
+         (ytm-radio--player (ytm-radio--make-player))
+         (ytm-radio--loaded t)
+         (ytm-radio--browser-view 'home)
+         (ytm-radio--browser-history nil)
+         (ytm-radio--browser-load-process nil))
     (with-current-buffer (ytm-radio--buffer)
       (let ((inhibit-read-only t))
         (erase-buffer)))
-    (cl-letf (((symbol-function 'ytm-radio--fetch-helper-browse-id-sources)
-               (lambda (_browse-id &optional _params) (list header songs))))
+    (cl-letf (((symbol-function 'ytm-radio--call-helper-async)
+               (lambda (_arguments success _error-callback)
+                 (funcall success 'data)
+                 nil))
+              ((symbol-function 'ytm-radio--helper-sources)
+               (lambda (_data) (list header songs)))
+              ((symbol-function 'ytm-radio--save) #'ignore))
       (ytm-radio--open-browse-id-as-source "UC1")
       (should (eq (ytm-radio--view-kind) 'detail))
       (should (equal (ytm-radio--view-value :source-ids)
                      '("ytm:browse:UC1:header"
-                       "ytm:browse:UC1:1:songs"))))))
+                       "ytm:browse:UC1:1:songs")))
+      (should (eq (ytm-radio--view-value :origin-view) 'home))
+      (should (equal ytm-radio--browser-history '(home))))))
+
+(ert-deftest ytm-radio-open-browse-id-single-source-uses-context-header ()
+  "Show album/playlist detail headers even when the helper returns one source."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Someone Like You"
+                 :url "https://music.youtube.com/watch?v=v1"
+                 :duration 286))
+         (source (ytm-radio--make-source
+                  :id "ytm:browse:VLPL1"
+                  :kind 'youtube-music-playlist
+                  :title "Playlist"
+                  :url "https://music.youtube.com/browse/VLPL1"
+                  :items (list track)
+                  :tracks (list track)))
+         (item '((type . "playlist")
+                 (title . "Adele Mix")
+                 (subtitle . "Playlist - YouTube Music")
+                 (thumbnail-url . "https://example.com/adele-mix.jpg")))
+         (ytm-radio-helper-use-mock-data t)
+         (ytm-radio--state (ytm-radio--make-state))
+         (ytm-radio--player (ytm-radio--make-player))
+         (ytm-radio--loaded t)
+         (ytm-radio--browser-view 'home)
+         (ytm-radio--browser-history nil)
+         (ytm-radio--browser-load-process nil))
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'ytm-radio--call-helper-async)
+               (lambda (_arguments success _error-callback)
+                 (funcall success 'data)
+                 nil))
+              ((symbol-function 'ytm-radio--helper-sources)
+               (lambda (_data) (list source)))
+              ((symbol-function 'ytm-radio--save) #'ignore))
+      (ytm-radio--open-browse-id-as-source "VLPL1" nil item)
+      (should (eq (ytm-radio--view-kind) 'detail))
+      (should (equal (ytm-radio--view-value :source-ids)
+                     '("ytm:browse:VLPL1:header"
+                       "ytm:browse:VLPL1")))
+      (let ((header (ytm-radio--source "ytm:browse:VLPL1:header")))
+        (should (eq (map-elt header :kind) 'youtube-music-playlist))
+        (should (equal (map-elt header :title) "Adele Mix"))
+        (should (equal (map-elt header :thumbnail-url)
+                       "https://example.com/adele-mix.jpg")))
+      (should (eq (ytm-radio--view-value :origin-view) 'home))
+      (should (equal ytm-radio--browser-history '(home))))))
+
+(ert-deftest ytm-radio-open-browse-id-preserves-root-origin ()
+  "Keep the originating root tab active when opening detail views."
+  (let* ((header (ytm-radio--make-source
+                  :id "ytm:browse:UC1:header"
+                  :kind 'youtube-music-artist
+                  :title "Artist"
+                  :url "https://music.youtube.com/browse/UC1"
+                  :items nil
+                  :tracks nil))
+         (songs (ytm-radio--make-source
+                 :id "ytm:browse:UC1:1:songs"
+                 :kind 'youtube-music-detail-section
+                 :title "Songs"
+                 :url "https://music.youtube.com/browse/UC1"
+                 :items nil
+                 :tracks nil))
+         (ytm-radio-helper-use-mock-data t)
+         (ytm-radio--state (ytm-radio--make-state))
+         (ytm-radio--player (ytm-radio--make-player))
+         (ytm-radio--loaded t)
+         (ytm-radio--browser-view 'library)
+         (ytm-radio--browser-history nil)
+         (ytm-radio--browser-load-process nil))
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'ytm-radio--call-helper-async)
+               (lambda (_arguments success _error-callback)
+                 (funcall success 'data)
+                 nil))
+              ((symbol-function 'ytm-radio--helper-sources)
+               (lambda (_data) (list header songs)))
+              ((symbol-function 'ytm-radio--save) #'ignore))
+      (ytm-radio--open-browse-id-as-source "UC1")
+      (should (eq (ytm-radio--view-kind) 'detail))
+      (should (eq (ytm-radio--view-value :origin-view) 'library))
+      (should (ytm-radio--browser-root-active-p 'library))
+      (should-not (ytm-radio--browser-root-active-p 'home))
+      (should (equal ytm-radio--browser-history '(library))))))
+
+(ert-deftest ytm-radio-enter-source-preserves-root-origin ()
+  "Keep the originating root tab active when focusing one section."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:home:listen"
+                 :kind 'youtube-music-home-section
+                 :title "Listen again"
+                 :items nil
+                 :tracks nil))
+        (ytm-radio--state (ytm-radio--make-state))
+        (ytm-radio--player (ytm-radio--make-player))
+        (ytm-radio--loaded t)
+        (ytm-radio--browser-view 'explore)
+        (ytm-radio--browser-history nil))
+    (with-current-buffer (ytm-radio--buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (ytm-radio--enter-source source)
+    (should (eq (ytm-radio--view-kind) 'section))
+    (should (eq (ytm-radio--view-value :origin-view) 'explore))
+    (should (ytm-radio--browser-root-active-p 'explore))
+    (should-not (ytm-radio--browser-root-active-p 'home))))
 
 (ert-deftest ytm-radio-helper-login-arguments ()
   "Build Rust helper arguments for the browser login window."
@@ -1660,7 +2425,7 @@
      (member "--restart-running"
              (ytm-radio--helper-login-arguments "/tmp/ytm-auth.json" t)))))
 
-(ert-deftest ytm-radio-login-detects-restartable-diagnostics ()
+(ert-deftest ytm-radio-browser-login-detects-restartable-diagnostics ()
   "Detect helper diagnostics that can be handled by browser restart."
   (should
    (ytm-radio--login-restart-needed-p
@@ -1708,7 +2473,7 @@
       (should (functionp ytm-radio--login-continuation))
       (should (equal ytm-radio--login-status "Login waiting in browser...")))))
 
-(ert-deftest ytm-radio-login-runs-continuation-after-success ()
+(ert-deftest ytm-radio-browser-login-runs-continuation-after-success ()
   "Run the pending account action after login imports auth."
   (let ((ytm-radio--state (ytm-radio--make-state))
         (ytm-radio--loaded t)
