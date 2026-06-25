@@ -1531,33 +1531,59 @@ When APPEND is non-nil, load `ytm-radio--home-continuation'."
       (delete-process process))
     (setq ytm-radio--last-rendered-progress-key nil)))
 
+(defun ytm-radio--schedule-next-track-prefetch (track)
+  "Schedule background stream prefetch for TRACK's successor."
+  (when-let* ((next (ytm-radio--next-track track)))
+    (ytm-radio--schedule-stream-prefetch (list next))))
+
+(defun ytm-radio--restart-current-track-in-place (track)
+  "Restart TRACK in the current mpv instance when it is already loaded."
+  (when-let* ((current (map-elt ytm-radio--player :current-track))
+              ((ytm-radio--same-track-p current track))
+              (process (map-elt ytm-radio--player :process))
+              (ipc-process (map-elt ytm-radio--player :ipc-process))
+              ((process-live-p process))
+              ((process-live-p ipc-process)))
+    (setf (map-elt ytm-radio--player :current-track) track
+          (map-elt ytm-radio--player :status) 'playing
+          (map-elt ytm-radio--player :position) 0
+          (map-elt ytm-radio--player :duration) (map-elt track :duration)
+          (map-elt ytm-radio--state :last-track-id) (map-elt track :id))
+    (setq ytm-radio--last-rendered-progress-key nil)
+    (ytm-radio--reset-title-scroll)
+    (ytm-radio--mpv-send (list "seek" 0 "absolute"))
+    (ytm-radio--mpv-send (list "set_property" "pause" :json-false))
+    (ytm-radio--render)
+    (ytm-radio--show-now-playing nil)
+    t))
+
 (defun ytm-radio--play-track (track)
   "Play TRACK with mpv."
   (ytm-radio--ensure-program ytm-radio-mpv-program "mpv")
   (unless (map-elt track :url)
     (user-error "Track has no playable URL"))
-  (ytm-radio--stop-process)
-  (let* ((socket (make-temp-name
-                  (file-name-concat temporary-file-directory "ytm-radio-mpv-")))
-         (args (ytm-radio--mpv-arguments socket (ytm-radio--playback-url track)))
-         (process (apply #'start-process
-                         "ytm-radio-mpv" nil ytm-radio-mpv-program args)))
-    (set-process-sentinel process #'ytm-radio--mpv-sentinel)
-    (setf (map-elt ytm-radio--player :process) process
-          (map-elt ytm-radio--player :socket) socket
-          (map-elt ytm-radio--player :current-track) track
-          (map-elt ytm-radio--player :status) 'loading
-          (map-elt ytm-radio--player :position) nil
-          (map-elt ytm-radio--player :duration) (map-elt track :duration)
-          (map-elt ytm-radio--state :last-track-id) (map-elt track :id))
-    (setq ytm-radio--last-rendered-progress-key nil)
-    (ytm-radio--reset-title-scroll)
-    (ytm-radio--save)
-    (ytm-radio--mpv-connect socket process 0)
-    (ytm-radio--render)
-    (ytm-radio--show-now-playing nil)
-    (when-let* ((next (ytm-radio--next-track track)))
-      (ytm-radio--schedule-stream-prefetch (list next)))))
+  (unless (ytm-radio--restart-current-track-in-place track)
+    (ytm-radio--stop-process)
+    (let* ((socket (make-temp-name
+                    (file-name-concat temporary-file-directory "ytm-radio-mpv-")))
+           (args (ytm-radio--mpv-arguments socket (ytm-radio--playback-url track)))
+           (process (apply #'start-process
+                           "ytm-radio-mpv" nil ytm-radio-mpv-program args)))
+      (set-process-sentinel process #'ytm-radio--mpv-sentinel)
+      (setf (map-elt ytm-radio--player :process) process
+            (map-elt ytm-radio--player :socket) socket
+            (map-elt ytm-radio--player :current-track) track
+            (map-elt ytm-radio--player :status) 'loading
+            (map-elt ytm-radio--player :position) nil
+            (map-elt ytm-radio--player :duration) (map-elt track :duration)
+            (map-elt ytm-radio--state :last-track-id) (map-elt track :id))
+      (setq ytm-radio--last-rendered-progress-key nil)
+      (ytm-radio--reset-title-scroll)
+      (ytm-radio--save)
+      (ytm-radio--mpv-connect socket process 0)
+      (ytm-radio--render)
+      (ytm-radio--show-now-playing nil)))
+  (ytm-radio--schedule-next-track-prefetch track))
 
 (defun ytm-radio--mpv-connect (socket process attempt)
   "Connect to mpv SOCKET for PROCESS, retrying from ATTEMPT."

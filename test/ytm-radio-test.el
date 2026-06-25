@@ -179,6 +179,55 @@
         (when (process-live-p process)
           (delete-process process))))))
 
+(ert-deftest ytm-radio-play-track-restarts-current-track-in-place ()
+  "Restart the current track with mpv IPC instead of replacing mpv."
+  (let* ((track-a (ytm-radio--make-track
+                   :id "a"
+                   :title "A"
+                   :duration 180
+                   :url "https://music.youtube.com/watch?v=a"))
+         (track-b (ytm-radio--make-track
+                   :id "b"
+                   :title "B"
+                   :url "https://music.youtube.com/watch?v=b"))
+         (source (ytm-radio--make-source
+                  :id "s"
+                  :kind 'youtube-music-library
+                  :title "S"
+                  :tracks (list track-a track-b)))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (list (cons "s" source))
+           :last-track-id "a"))
+         (ytm-radio--player
+          (ytm-radio--make-player
+           :status 'paused
+           :current-track track-a
+           :process 'mpv-process
+           :ipc-process 'mpv-ipc
+           :position 42))
+         commands
+         scheduled)
+    (cl-letf (((symbol-function 'process-live-p)
+               (lambda (process) (memq process '(mpv-process mpv-ipc))))
+              ((symbol-function 'ytm-radio--ensure-program) #'ignore)
+              ((symbol-function 'ytm-radio--stop-process)
+               (lambda () (error "should not stop mpv")))
+              ((symbol-function 'start-process)
+               (lambda (&rest _args) (error "should not start mpv")))
+              ((symbol-function 'ytm-radio--mpv-send)
+               (lambda (command) (push command commands)))
+              ((symbol-function 'ytm-radio--render) #'ignore)
+              ((symbol-function 'ytm-radio--show-now-playing) #'ignore)
+              ((symbol-function 'ytm-radio--schedule-stream-prefetch)
+               (lambda (tracks) (setq scheduled tracks))))
+      (ytm-radio--play-track track-a)
+      (should (member '("seek" 0 "absolute") commands))
+      (should (member '("set_property" "pause" :json-false) commands))
+      (should (eq (map-elt ytm-radio--player :status) 'playing))
+      (should (= (map-elt ytm-radio--player :position) 0))
+      (should (equal scheduled (list track-b))))))
+
 (ert-deftest ytm-radio-render-explains-empty-catalog ()
   "Render an empty catalog with next-step guidance."
   (let ((ytm-radio--state (ytm-radio--make-state))
