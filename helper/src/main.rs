@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 mod auth;
 mod ytmusic;
 
@@ -9,7 +11,8 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
 use ytmusic::{
-    bootstrap_cache_path, browse, browse_id as browse_detail, continuation, search, BrowseTarget,
+    add_to_playlist, bootstrap_cache_path, browse, browse_id as browse_detail, continuation,
+    library, playlist_options, radio, rate, search, BrowseTarget,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -37,6 +40,24 @@ enum Command {
     },
     Search {
         query: String,
+    },
+    Rate {
+        video_id: String,
+        rating: String,
+    },
+    Radio {
+        video_id: String,
+    },
+    PlaylistOptions {
+        video_id: String,
+    },
+    AddToPlaylist {
+        video_id: String,
+        playlist_id: String,
+    },
+    Library {
+        video_id: String,
+        action: String,
     },
 }
 
@@ -160,6 +181,50 @@ where
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
             search(query, options.limit, &auth, Some(&cache_path))?
         }
+        Command::Rate { video_id, rating } if options.mock_data => {
+            json!({ "video-id": video_id, "rating": rating })
+        }
+        Command::Rate { video_id, rating } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            rate(video_id, rating, &auth, Some(&cache_path))?
+        }
+        Command::Radio { video_id } if options.mock_data => mock_radio(video_id, options.limit),
+        Command::Radio { video_id } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            radio(video_id, options.limit, &auth, Some(&cache_path))?
+        }
+        Command::PlaylistOptions { video_id } if options.mock_data => {
+            mock_playlist_options(video_id)
+        }
+        Command::PlaylistOptions { video_id } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            playlist_options(video_id, &auth, Some(&cache_path))?
+        }
+        Command::AddToPlaylist {
+            video_id,
+            playlist_id,
+        } if options.mock_data => {
+            json!({ "video-id": video_id, "playlist-id": playlist_id })
+        }
+        Command::AddToPlaylist {
+            video_id,
+            playlist_id,
+        } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            add_to_playlist(video_id, playlist_id, &auth, Some(&cache_path))?
+        }
+        Command::Library { video_id, action } if options.mock_data => {
+            json!({
+                "video-id": video_id,
+                "in-library": action != "remove",
+                "action": action,
+                "changed": true
+            })
+        }
+        Command::Library { video_id, action } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            library(video_id, action, &auth, Some(&cache_path))?
+        }
     };
     serde_json::to_string(&Envelope {
         ok: true,
@@ -201,6 +266,11 @@ where
         "browse-id" => parse_browse_id_command(&mut args)?,
         "continuation" => parse_continuation_command(&mut args)?,
         "search" => parse_search_command(&mut args)?,
+        "rate" => parse_rate_command(&mut args)?,
+        "radio" => parse_video_id_command(&mut args, "radio")?,
+        "playlist-options" => parse_video_id_command(&mut args, "playlist-options")?,
+        "add-to-playlist" => parse_add_to_playlist_command(&mut args)?,
+        "library" => parse_library_command(&mut args)?,
         "help" | "--help" | "-h" => return Err(usage()),
         other => return Err(format!("unknown command `{other}`")),
     };
@@ -408,6 +478,72 @@ fn parse_search_command(args: &mut Vec<String>) -> Result<Command, String> {
     Ok(Command::Search { query })
 }
 
+fn parse_rate_command(args: &mut Vec<String>) -> Result<Command, String> {
+    let video_id = parse_required_video_id(args)?;
+    let Some(rating) = args.first().cloned() else {
+        return Err("expected rating".to_string());
+    };
+    args.remove(0);
+    match rating.as_str() {
+        "like" | "dislike" | "indifferent" => Ok(Command::Rate { video_id, rating }),
+        other => Err(format!("unknown rating `{other}`")),
+    }
+}
+
+fn parse_video_id_command(args: &mut Vec<String>, command: &str) -> Result<Command, String> {
+    let video_id = parse_required_video_id(args)?;
+    match command {
+        "radio" => Ok(Command::Radio { video_id }),
+        "playlist-options" => Ok(Command::PlaylistOptions { video_id }),
+        other => Err(format!("unknown video id command `{other}`")),
+    }
+}
+
+fn parse_add_to_playlist_command(args: &mut Vec<String>) -> Result<Command, String> {
+    let video_id = parse_required_video_id(args)?;
+    let Some(playlist_id) = args.first().cloned() else {
+        return Err("expected playlist id".to_string());
+    };
+    args.remove(0);
+    if playlist_id.trim().is_empty() {
+        return Err("playlist id must not be empty".to_string());
+    }
+    Ok(Command::AddToPlaylist {
+        video_id,
+        playlist_id,
+    })
+}
+
+fn parse_library_command(args: &mut Vec<String>) -> Result<Command, String> {
+    let video_id = parse_required_video_id(args)?;
+    let Some(action) = args.first().cloned() else {
+        return Err("expected library action".to_string());
+    };
+    args.remove(0);
+    match action.as_str() {
+        "toggle" | "save" | "remove" => Ok(Command::Library { video_id, action }),
+        other => Err(format!("unknown library action `{other}`")),
+    }
+}
+
+fn parse_required_video_id(args: &mut Vec<String>) -> Result<String, String> {
+    let Some(video_id) = args.first().cloned() else {
+        return Err("expected video id".to_string());
+    };
+    args.remove(0);
+    if !is_youtube_video_id(&video_id) {
+        return Err("video id must be an 11-character YouTube video id".to_string());
+    }
+    Ok(video_id)
+}
+
+fn is_youtube_video_id(video_id: &str) -> bool {
+    video_id.len() == 11
+        && video_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 fn option_value<'a>(args: &'a [String], index: &mut usize) -> Result<&'a str, String> {
     *index += 1;
     args.get(*index)
@@ -430,6 +566,16 @@ fn usage() -> String {
         "  ytm-radio-helper continuation TOKEN --mock [--limit N]",
         "  ytm-radio-helper search QUERY --auth FILE [--limit N]",
         "  ytm-radio-helper search QUERY --mock [--limit N]",
+        "  ytm-radio-helper rate VIDEO_ID like|dislike|indifferent --auth FILE",
+        "  ytm-radio-helper rate VIDEO_ID like|dislike|indifferent --mock",
+        "  ytm-radio-helper radio VIDEO_ID --auth FILE [--limit N]",
+        "  ytm-radio-helper radio VIDEO_ID --mock [--limit N]",
+        "  ytm-radio-helper playlist-options VIDEO_ID --auth FILE",
+        "  ytm-radio-helper playlist-options VIDEO_ID --mock",
+        "  ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --auth FILE",
+        "  ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --mock",
+        "  ytm-radio-helper library VIDEO_ID toggle|save|remove --auth FILE",
+        "  ytm-radio-helper library VIDEO_ID toggle|save|remove --mock",
     ]
     .join("\n")
 }
@@ -592,6 +738,65 @@ fn mock_search(query: &str, limit: usize) -> Value {
             "items": items.into_iter().take(limit).collect::<Vec<_>>(),
             "continuation": null
         }]
+    })
+}
+
+fn mock_radio(video_id: &str, limit: usize) -> Value {
+    let items = (0..limit.min(3))
+        .map(|index| {
+            let id = if index == 0 {
+                video_id.to_string()
+            } else {
+                format!("mockRADIO{index:02}")
+            };
+            json!({
+                "type": "track",
+                "id": id,
+                "title": format!("Mock Radio Track {}", index + 1),
+                "url": format!("https://music.youtube.com/watch?v={id}"),
+                "artist": "Mock Artist",
+                "album": null,
+                "duration": 180,
+                "thumbnail-url": null,
+                "like-status": null,
+                "in-library": false
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "sources": [{
+            "id": format!("ytm:radio:{video_id}"),
+            "kind": "youtube-music-radio",
+            "title": format!("Radio: {video_id}"),
+            "url": format!("https://music.youtube.com/watch?v={video_id}&list=RDAMVM{video_id}"),
+            "items": items,
+            "continuation": "mock-radio-continuation"
+        }]
+    })
+}
+
+fn mock_playlist_options(_video_id: &str) -> Value {
+    json!({
+        "title": "Add to playlist",
+        "options": [
+            {
+                "playlist-id": "mock-playlist-1",
+                "title": "Mock Playlist 1",
+                "subtitle": "Private",
+                "thumbnail-url": null,
+                "selected": false,
+                "privacy-status": "PRIVATE"
+            },
+            {
+                "playlist-id": "mock-playlist-2",
+                "title": "Mock Playlist 2",
+                "subtitle": "Public",
+                "thumbnail-url": null,
+                "selected": false,
+                "privacy-status": "PUBLIC"
+            }
+        ],
+        "can-create-playlist": false
     })
 }
 
@@ -828,6 +1033,8 @@ fn mock_browse_id(browse_id: &str, limit: usize) -> Value {
 mod tests {
     use super::*;
 
+    const VIDEO_ID: &str = "abc123_DEF4";
+
     #[test]
     fn parses_browse_mock_command() {
         let options = parse_args(["browse", "home", "--mock", "--limit", "2"]).unwrap();
@@ -949,6 +1156,76 @@ mod tests {
     }
 
     #[test]
+    fn parses_rate_command() {
+        let options = parse_args(["rate", VIDEO_ID, "like", "--mock"]).unwrap();
+        assert_eq!(
+            options,
+            Options {
+                command: Command::Rate {
+                    video_id: VIDEO_ID.to_string(),
+                    rating: "like".to_string(),
+                },
+                auth_file: None,
+                limit: 100,
+                mock_data: true,
+                initial_only: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_current_track_action_commands() {
+        let radio_options = parse_args(["radio", VIDEO_ID, "--mock"]).unwrap();
+        assert_eq!(
+            radio_options.command,
+            Command::Radio {
+                video_id: VIDEO_ID.to_string()
+            }
+        );
+        let playlist_options = parse_args(["playlist-options", VIDEO_ID, "--mock"]).unwrap();
+        assert_eq!(
+            playlist_options.command,
+            Command::PlaylistOptions {
+                video_id: VIDEO_ID.to_string()
+            }
+        );
+        let add_options = parse_args(["add-to-playlist", VIDEO_ID, "PL1", "--mock"]).unwrap();
+        assert_eq!(
+            add_options.command,
+            Command::AddToPlaylist {
+                video_id: VIDEO_ID.to_string(),
+                playlist_id: "PL1".to_string()
+            }
+        );
+        let library_options = parse_args(["library", VIDEO_ID, "toggle", "--mock"]).unwrap();
+        assert_eq!(
+            library_options.command,
+            Command::Library {
+                video_id: VIDEO_ID.to_string(),
+                action: "toggle".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_video_id() {
+        let error = parse_args(["radio", "v1", "--mock"]).unwrap_err();
+        assert!(error.contains("11-character YouTube video id"));
+    }
+
+    #[test]
+    fn rejects_unknown_rating() {
+        let error = parse_args(["rate", VIDEO_ID, "favorite"]).unwrap_err();
+        assert!(error.contains("unknown rating"));
+    }
+
+    #[test]
+    fn rejects_unknown_library_action() {
+        let error = parse_args(["library", VIDEO_ID, "pin"]).unwrap_err();
+        assert!(error.contains("unknown library action"));
+    }
+
+    #[test]
     fn parses_login_window_command_with_defaults() {
         let options =
             parse_args(["auth", "login-window", "--output", "/tmp/ytm/auth.json"]).unwrap();
@@ -1045,6 +1322,30 @@ mod tests {
         assert!(output.contains("tokyo artist"));
         assert!(output.contains("tokyo podcast"));
         assert!(output.contains("tokyo playlist"));
+    }
+
+    #[test]
+    fn mock_rate_outputs_rating() {
+        let output = run(["rate", VIDEO_ID, "dislike", "--mock"]).unwrap();
+        assert!(output.contains(r#""schema":1"#));
+        assert!(output.contains(r#""video-id":"abc123_DEF4""#));
+        assert!(output.contains(r#""rating":"dislike""#));
+    }
+
+    #[test]
+    fn mock_current_track_actions_output_data() {
+        let radio_output = run(["radio", VIDEO_ID, "--mock", "--limit", "2"]).unwrap();
+        assert!(radio_output.contains(r#""kind":"youtube-music-radio""#));
+        assert!(radio_output.contains(r#""id":"abc123_DEF4""#));
+
+        let options_output = run(["playlist-options", VIDEO_ID, "--mock"]).unwrap();
+        assert!(options_output.contains(r#""playlist-id":"mock-playlist-1""#));
+
+        let add_output = run(["add-to-playlist", VIDEO_ID, "mock-playlist-1", "--mock"]).unwrap();
+        assert!(add_output.contains(r#""playlist-id":"mock-playlist-1""#));
+
+        let library_output = run(["library", VIDEO_ID, "toggle", "--mock"]).unwrap();
+        assert!(library_output.contains(r#""in-library":true"#));
     }
 
     #[test]

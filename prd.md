@@ -28,10 +28,13 @@ and useful.
   playlists, podcasts, and recommendation sections when the web response
   exposes them.
 - Keep playback controls keyboard-first: open, play, pause, next, previous,
-  seek, repeat, shuffle, share, and back navigation must be available without
-  mouse interaction.
+  seek, repeat, shuffle, share, queue viewing, current-song actions, and back
+  navigation must be available without mouse interaction.
 - Keep the now-playing child frame focused on cover art, title, artist,
   progress, and compact playback-mode controls.
+- Treat the currently playing track as a first-class action target, separate
+  from browser point, so account actions and local queue actions remain
+  predictable when point is on a search result, section, album, or artist.
 - Keep account access short-lived and outside Elisp, while making the browser
   login handoff automatic when account-backed views require it.
 
@@ -67,6 +70,10 @@ and useful.
   depend on reparsing visible text.
 - Opening a non-track item should expand the YouTube Music detail page when the
   helper can fetch it.
+- Playing from a detail page, source, search result, or mix should establish a
+  runtime queue that `next`, `previous`, and the queue view use consistently.
+- Current-track actions should be fast to reach through direct bindings and a
+  transient menu, while each action remains callable as a normal command.
 - Browser refreshes should preserve point when possible and never park point at
   the end as a side effect of rendering.
 - The now-playing child frame should not steal focus during track changes.
@@ -75,10 +82,13 @@ and useful.
 
 ## Technical Requirements
 
-- Elisp owns local catalog state, UI rendering, user commands, and mpv IPC.
+- Elisp owns local catalog state, runtime queue state, UI rendering, user
+  commands, and mpv IPC.
 - `yt-dlp` owns URL metadata discovery and mpv's ytdl media extraction path.
-- The Rust helper owns YouTube Music account requests, the browser login
-  window, and helper JSON envelopes.
+- The Rust helper owns YouTube Music account requests, account mutations, the
+  browser login window, and helper JSON envelopes. Elisp may choose targets and
+  update local display state, but it must not persist YouTube Music feedback
+  tokens or duplicate Innertube request assembly.
 - Helper stdout must remain machine-readable JSON; diagnostics belong on
   stderr.
 - Helper schema versions are explicit, and unsupported schema versions must be

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use crate::auth::AuthConfig;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT};
@@ -158,6 +160,152 @@ pub fn search(
         bootstrap_cache.map(response_cache_dir).as_deref(),
     )?;
     Ok(normalize_search_response(query, limit, &response))
+}
+
+pub fn rate(
+    video_id: &str,
+    rating: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+) -> Result<Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let endpoint = match rating {
+        "like" => "like/like",
+        "dislike" => "like/dislike",
+        "indifferent" => "like/removelike",
+        other => return Err(format!("unknown rating `{other}`")),
+    };
+    let body = json!({
+        "context": youtubei_context(auth, &bootstrap),
+        "target": { "videoId": video_id }
+    });
+    request_youtubei_path(&client, auth, &bootstrap, endpoint, &body, None, 0)?;
+    Ok(json!({
+        "video-id": video_id,
+        "rating": rating
+    }))
+}
+
+pub fn radio(
+    video_id: &str,
+    limit: usize,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+) -> Result<Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let response = request_radio_queue(&client, auth, &bootstrap, video_id)?;
+    Ok(normalize_radio_response(video_id, limit, &response))
+}
+
+pub fn playlist_options(
+    video_id: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+) -> Result<Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let response = request_add_to_playlist_options(
+        &client,
+        auth,
+        &bootstrap,
+        video_id,
+        bootstrap_cache.map(response_cache_dir).as_deref(),
+    )?;
+    Ok(normalize_add_to_playlist_options(&response))
+}
+
+pub fn add_to_playlist(
+    video_id: &str,
+    playlist_id: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+) -> Result<Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let clean_playlist_id = clean_playlist_id(playlist_id);
+    let body = json!({
+        "context": youtubei_context(auth, &bootstrap),
+        "playlistId": clean_playlist_id,
+        "actions": [{
+            "action": "ACTION_ADD_VIDEO",
+            "addedVideoId": video_id
+        }]
+    });
+    request_youtubei_path(
+        &client,
+        auth,
+        &bootstrap,
+        "browse/edit_playlist",
+        &body,
+        None,
+        0,
+    )?;
+    Ok(json!({
+        "video-id": video_id,
+        "playlist-id": clean_playlist_id
+    }))
+}
+
+pub fn library(
+    video_id: &str,
+    action: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+) -> Result<Value, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let response = request_song_next(&client, auth, &bootstrap, video_id)?;
+    let state = song_library_state(&response, video_id)?;
+    let (token, target_in_library, normalized_action) = match action {
+        "toggle" if state.in_library => (state.remove_token.as_deref(), false, "remove"),
+        "toggle" => (state.add_token.as_deref(), true, "save"),
+        "save" if state.in_library => (None, true, "save"),
+        "save" => (state.add_token.as_deref(), true, "save"),
+        "remove" if !state.in_library => (None, false, "remove"),
+        "remove" => (state.remove_token.as_deref(), false, "remove"),
+        other => return Err(format!("unknown library action `{other}`")),
+    };
+    if let Some(token) = token {
+        let body = json!({
+            "context": youtubei_context(auth, &bootstrap),
+            "feedbackTokens": [token]
+        });
+        request_youtubei_path(&client, auth, &bootstrap, "feedback", &body, None, 0)?;
+        Ok(json!({
+            "video-id": video_id,
+            "in-library": target_in_library,
+            "action": normalized_action,
+            "changed": true
+        }))
+    } else if state.in_library == target_in_library {
+        Ok(json!({
+            "video-id": video_id,
+            "in-library": target_in_library,
+            "action": normalized_action,
+            "changed": false
+        }))
+    } else {
+        Err(format!(
+            "YouTube Music did not return a {normalized_action} library token for `{video_id}`"
+        ))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -619,6 +767,61 @@ fn request_search(
         &body,
         cache_dir,
         RESPONSE_CACHE_SEARCH_TTL_SECS,
+    )
+}
+
+fn request_song_next(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    video_id: &str,
+) -> Result<Value, String> {
+    let body = json!({
+        "context": youtubei_context(auth, bootstrap),
+        "videoId": video_id,
+        "enablePersistentPlaylistPanel": true,
+        "isAudioOnly": true,
+        "tunerSettingValue": "AUTOMIX_SETTING_NORMAL"
+    });
+    request_youtubei_path(client, auth, bootstrap, "next", &body, None, 0)
+}
+
+fn request_radio_queue(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    video_id: &str,
+) -> Result<Value, String> {
+    let body = json!({
+        "context": youtubei_context(auth, bootstrap),
+        "videoId": video_id,
+        "playlistId": format!("RDAMVM{video_id}"),
+        "enablePersistentPlaylistPanel": true,
+        "isAudioOnly": true,
+        "tunerSettingValue": "AUTOMIX_SETTING_NORMAL"
+    });
+    request_youtubei_path(client, auth, bootstrap, "next", &body, None, 0)
+}
+
+fn request_add_to_playlist_options(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    video_id: &str,
+    cache_dir: Option<&Path>,
+) -> Result<Value, String> {
+    let body = json!({
+        "context": youtubei_context(auth, bootstrap),
+        "videoIds": [video_id]
+    });
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        "playlist/get_add_to_playlist",
+        &body,
+        cache_dir,
+        RESPONSE_CACHE_TTL_SECS,
     )
 }
 
@@ -1108,9 +1311,11 @@ fn normalize_search_response(query: &str, limit: usize, response: &Value) -> Val
         "https://music.youtube.com/search?q={}",
         url_query_encode(query)
     );
+    let root = primary_search_section_root(response).unwrap_or(response);
     let mut sections = Vec::new();
-    collect_sections(response, &mut sections, limit);
+    collect_sections(root, &mut sections, limit);
     if !sections.is_empty() {
+        append_unsectioned_search_items(root, &mut sections, limit);
         let sources: Vec<Value> = sections
             .into_iter()
             .enumerate()
@@ -1130,7 +1335,7 @@ fn normalize_search_response(query: &str, limit: usize, response: &Value) -> Val
 
     let mut items = Vec::new();
     let mut seen = HashSet::new();
-    collect_items(response, &mut items, &mut seen, limit);
+    collect_items(root, &mut items, &mut seen, limit);
     json!({
         "sources": [normalized_source(
             parent_id,
@@ -1141,6 +1346,48 @@ fn normalize_search_response(query: &str, limit: usize, response: &Value) -> Val
             find_first_string_for_key(response, "continuation")
         )]
     })
+}
+
+fn primary_search_section_root(value: &Value) -> Option<&Value> {
+    let tabs = value
+        .pointer("/contents/tabbedSearchResultsRenderer/tabs")
+        .and_then(Value::as_array)?;
+    tabs.iter()
+        .filter_map(|tab| tab.get("tabRenderer"))
+        .find(|tab| {
+            tab.get("selected")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .or_else(|| tabs.iter().filter_map(|tab| tab.get("tabRenderer")).next())
+        .and_then(search_tab_section_root)
+}
+
+fn search_tab_section_root(tab: &Value) -> Option<&Value> {
+    [
+        "/content/sectionListRenderer/contents",
+        "/content/sectionListRenderer",
+    ]
+    .iter()
+    .find_map(|pointer| tab.pointer(pointer))
+}
+
+fn append_unsectioned_search_items(value: &Value, sections: &mut Vec<MusicSection>, limit: usize) {
+    let mut seen = HashSet::new();
+    for section in sections.iter() {
+        for item in &section.items {
+            seen.insert(item_dedupe_key(item));
+        }
+    }
+    let mut items = Vec::new();
+    collect_items(value, &mut items, &mut seen, limit);
+    if !items.is_empty() {
+        sections.push(MusicSection {
+            title: "Results".to_string(),
+            items,
+            continuation: find_first_string_for_key(value, "continuation"),
+        });
+    }
 }
 
 fn normalize_browse_id_response(browse_id: &str, limit: usize, response: &Value) -> Value {
@@ -1339,6 +1586,430 @@ fn normalized_source_with_metadata(
         "thumbnail-url": metadata.thumbnail_url,
         "continuation": metadata.continuation
     })
+}
+
+fn normalize_radio_response(video_id: &str, limit: usize, response: &Value) -> Value {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    collect_playlist_panel_tracks(response, &mut items, &mut seen, limit);
+    let title = items
+        .first()
+        .and_then(|item| item.get("title"))
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .map(|title| format!("Radio: {title}"))
+        .unwrap_or_else(|| format!("Radio: {video_id}"));
+    let url = format!("https://music.youtube.com/watch?v={video_id}&list=RDAMVM{video_id}");
+    json!({
+        "sources": [normalized_source(
+            format!("ytm:radio:{video_id}"),
+            "youtube-music-radio",
+            title,
+            &url,
+            items,
+            find_radio_continuation(response)
+        )]
+    })
+}
+
+fn normalize_add_to_playlist_options(response: &Value) -> Value {
+    let root = find_object_named(response, "addToPlaylistRenderer").unwrap_or(response);
+    let title = root.get("title").and_then(first_text);
+    let mut options = Vec::new();
+    let mut seen = HashSet::new();
+    collect_add_to_playlist_options(root, &mut options, &mut seen);
+    json!({
+        "title": title,
+        "options": options,
+        "can-create-playlist": contains_object_key(root, "createPlaylistEndpoint")
+    })
+}
+
+fn collect_playlist_panel_tracks(
+    value: &Value,
+    items: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+    limit: usize,
+) {
+    if items.len() >= limit {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            if let Some(renderer) = object.get("playlistPanelVideoRenderer") {
+                if let Some(item) = parse_playlist_panel_track(renderer) {
+                    if seen.insert(item_dedupe_key(&item)) {
+                        items.push(item);
+                    }
+                }
+                return;
+            }
+            for nested in object.values() {
+                collect_playlist_panel_tracks(nested, items, seen, limit);
+                if items.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Value::Array(array) => {
+            for nested in array {
+                collect_playlist_panel_tracks(nested, items, seen, limit);
+                if items.len() >= limit {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_playlist_panel_track(renderer: &Value) -> Option<Value> {
+    let video_id = panel_video_id(renderer)?;
+    let title = renderer
+        .pointer("/title/runs/0/text")
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| first_text(renderer))?;
+    let artist = panel_byline_text(renderer);
+    let duration = renderer
+        .pointer("/lengthText/runs/0/text")
+        .and_then(Value::as_str)
+        .and_then(parse_duration);
+    let thumbnail_url = renderer
+        .get("thumbnail")
+        .and_then(find_best_thumbnail)
+        .or_else(|| find_best_thumbnail(renderer));
+    let menu = panel_menu_state(renderer);
+    let mut item = Map::from_iter([
+        ("type".to_string(), Value::String("track".to_string())),
+        ("id".to_string(), Value::String(video_id.clone())),
+        ("title".to_string(), Value::String(title)),
+        (
+            "url".to_string(),
+            Value::String(format!("https://music.youtube.com/watch?v={video_id}")),
+        ),
+        (
+            "artist".to_string(),
+            artist.map(Value::String).unwrap_or(Value::Null),
+        ),
+        ("album".to_string(), Value::Null),
+        (
+            "duration".to_string(),
+            duration.map(Value::from).unwrap_or(Value::Null),
+        ),
+        (
+            "thumbnail-url".to_string(),
+            thumbnail_url.map(Value::String).unwrap_or(Value::Null),
+        ),
+        (
+            "like-status".to_string(),
+            menu.like_status.map(Value::String).unwrap_or(Value::Null),
+        ),
+        ("in-library".to_string(), Value::Bool(menu.in_library)),
+    ]);
+    Some(Value::Object(std::mem::take(&mut item)))
+}
+
+fn panel_video_id(renderer: &Value) -> Option<String> {
+    renderer
+        .get("videoId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            renderer
+                .get("navigationEndpoint")
+                .and_then(watch_endpoint_from_navigation_endpoint)
+                .map(|endpoint| endpoint.video_id)
+        })
+}
+
+fn panel_byline_text(renderer: &Value) -> Option<String> {
+    let runs = renderer
+        .pointer("/longBylineText/runs")
+        .and_then(Value::as_array)?;
+    let parts = runs
+        .iter()
+        .filter_map(|run| run.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && !is_separator(text))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+#[derive(Debug, Default)]
+struct PanelMenuState {
+    in_library: bool,
+    add_token: Option<String>,
+    remove_token: Option<String>,
+    like_status: Option<String>,
+}
+
+fn song_library_state(response: &Value, video_id: &str) -> Result<PanelMenuState, String> {
+    let renderer = find_playlist_panel_video_renderer(response, video_id)
+        .ok_or_else(|| format!("YouTube Music did not return metadata for `{video_id}`"))?;
+    Ok(panel_menu_state(renderer))
+}
+
+fn find_playlist_panel_video_renderer<'a>(value: &'a Value, video_id: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(object) => {
+            if let Some(renderer) = object.get("playlistPanelVideoRenderer") {
+                if panel_video_id(renderer).as_deref() == Some(video_id) {
+                    return Some(renderer);
+                }
+            }
+            object
+                .values()
+                .find_map(|nested| find_playlist_panel_video_renderer(nested, video_id))
+        }
+        Value::Array(array) => array
+            .iter()
+            .find_map(|nested| find_playlist_panel_video_renderer(nested, video_id)),
+        _ => None,
+    }
+}
+
+fn panel_menu_state(renderer: &Value) -> PanelMenuState {
+    let mut state = PanelMenuState::default();
+    if let Some(menu_renderer) = renderer.pointer("/menu/menuRenderer") {
+        if let Some(items) = menu_renderer.get("items").and_then(Value::as_array) {
+            for item in items {
+                parse_menu_service_item(item, &mut state);
+                parse_toggle_menu_item(item, &mut state);
+            }
+        }
+        state.like_status = parse_like_status(menu_renderer);
+    }
+    state
+}
+
+fn parse_menu_service_item(item: &Value, state: &mut PanelMenuState) {
+    let Some(renderer) = item.get("menuServiceItemRenderer") else {
+        return;
+    };
+    let icon_type = renderer
+        .pointer("/icon/iconType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let token = extract_feedback_token(renderer, "serviceEndpoint");
+    match icon_type {
+        "LIBRARY_ADD" | "BOOKMARK_BORDER" => state.add_token = token,
+        "LIBRARY_REMOVE" | "BOOKMARK" => {
+            state.in_library = true;
+            state.remove_token = token;
+        }
+        _ => {}
+    }
+}
+
+fn parse_toggle_menu_item(item: &Value, state: &mut PanelMenuState) {
+    let Some(renderer) = item.get("toggleMenuServiceItemRenderer") else {
+        return;
+    };
+    let icon_type = renderer
+        .pointer("/defaultIcon/iconType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let default_token = extract_feedback_token(renderer, "defaultServiceEndpoint");
+    let toggled_token = extract_feedback_token(renderer, "toggledServiceEndpoint");
+    match icon_type {
+        "LIBRARY_ADD" | "BOOKMARK_BORDER" => {
+            state.add_token = default_token;
+            state.remove_token = toggled_token;
+        }
+        "LIBRARY_REMOVE" | "BOOKMARK" => {
+            state.in_library = true;
+            state.remove_token = default_token;
+            state.add_token = toggled_token;
+        }
+        _ => {}
+    }
+}
+
+fn extract_feedback_token(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|endpoint| endpoint.get("feedbackEndpoint"))
+        .and_then(|feedback| feedback.get("feedbackToken"))
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn parse_like_status(menu_renderer: &Value) -> Option<String> {
+    let buttons = menu_renderer
+        .get("topLevelButtons")
+        .and_then(Value::as_array)?;
+    buttons.iter().find_map(|button| {
+        let status = button
+            .get("likeButtonRenderer")
+            .and_then(|renderer| renderer.get("likeStatus"))
+            .and_then(Value::as_str)?;
+        match status {
+            "LIKE" => Some("like".to_string()),
+            "DISLIKE" => Some("dislike".to_string()),
+            _ => None,
+        }
+    })
+}
+
+fn find_radio_continuation(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(continuation) = object
+                .get("nextRadioContinuationData")
+                .and_then(|data| data.get("continuation"))
+                .and_then(Value::as_str)
+            {
+                return Some(continuation.to_string());
+            }
+            object.values().find_map(find_radio_continuation)
+        }
+        Value::Array(array) => array.iter().find_map(find_radio_continuation),
+        _ => None,
+    }
+}
+
+fn collect_add_to_playlist_options(
+    value: &Value,
+    options: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+) {
+    match value {
+        Value::Object(object) => {
+            for key in [
+                "playlistAddToOptionRenderer",
+                "addToPlaylistItemRenderer",
+                "musicResponsiveListItemRenderer",
+                "musicTwoRowItemRenderer",
+            ] {
+                if let Some(renderer) = object.get(key) {
+                    if let Some(option) = parse_add_to_playlist_option(renderer) {
+                        if let Some(playlist_id) = option.get("playlist-id").and_then(Value::as_str)
+                        {
+                            if seen.insert(playlist_id.to_string()) {
+                                options.push(option);
+                            }
+                        }
+                    }
+                }
+            }
+            for nested in object.values() {
+                collect_add_to_playlist_options(nested, options, seen);
+            }
+        }
+        Value::Array(array) => {
+            for nested in array {
+                collect_add_to_playlist_options(nested, options, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_add_to_playlist_option(renderer: &Value) -> Option<Value> {
+    let playlist_id = find_playlist_id(renderer)?;
+    let title = [
+        "/title",
+        "/text",
+        "/label",
+        "/primaryText",
+        "/header",
+        "/flexColumns",
+        "/runs",
+    ]
+    .iter()
+    .find_map(|pointer| renderer.pointer(pointer).and_then(first_text))
+    .filter(|title| title != "Create new playlist" && title != "New playlist")
+    .unwrap_or_else(|| "Unknown Playlist".to_string());
+    let subtitle = ["/subtitle", "/secondaryText"]
+        .iter()
+        .find_map(|pointer| renderer.pointer(pointer).and_then(first_text));
+    let thumbnail_url = find_best_thumbnail(renderer);
+    Some(json!({
+        "playlist-id": playlist_id,
+        "title": title,
+        "subtitle": subtitle,
+        "thumbnail-url": thumbnail_url,
+        "selected": find_first_bool_for_key(renderer, "selected").unwrap_or(false),
+        "privacy-status": find_first_string_for_key(renderer, "privacyStatus")
+    }))
+}
+
+fn find_playlist_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(playlist_id) = object
+                .get("playlistId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+            {
+                return Some(playlist_id.to_string());
+            }
+            if let Some(browse_id) = object.get("browseId").and_then(Value::as_str).filter(|id| {
+                !id.trim().is_empty() && (id.starts_with("VL") || id.starts_with("PL"))
+            }) {
+                return Some(browse_id.to_string());
+            }
+            object.values().find_map(find_playlist_id)
+        }
+        Value::Array(array) => array.iter().find_map(find_playlist_id),
+        _ => None,
+    }
+}
+
+fn find_first_bool_for_key(value: &Value, key: &str) -> Option<bool> {
+    match value {
+        Value::Object(object) => object.get(key).and_then(Value::as_bool).or_else(|| {
+            object
+                .values()
+                .find_map(|nested| find_first_bool_for_key(nested, key))
+        }),
+        Value::Array(array) => array
+            .iter()
+            .find_map(|nested| find_first_bool_for_key(nested, key)),
+        _ => None,
+    }
+}
+
+fn find_object_named<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(object) => {
+            if let Some(found) = object.get(key) {
+                return Some(found);
+            }
+            object
+                .values()
+                .find_map(|nested| find_object_named(nested, key))
+        }
+        Value::Array(array) => array
+            .iter()
+            .find_map(|nested| find_object_named(nested, key)),
+        _ => None,
+    }
+}
+
+fn contains_object_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key(key)
+                || object
+                    .values()
+                    .any(|nested| contains_object_key(nested, key))
+        }
+        Value::Array(array) => array.iter().any(|nested| contains_object_key(nested, key)),
+        _ => false,
+    }
+}
+
+fn clean_playlist_id(playlist_id: &str) -> &str {
+    playlist_id
+        .strip_prefix("VL")
+        .filter(|id| !id.is_empty())
+        .unwrap_or(playlist_id)
 }
 
 fn browse_response_title(value: &Value) -> Option<String> {
@@ -2605,6 +3276,200 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_radio_queue_response() {
+        let response = json!({
+            "contents": {
+                "singleColumnMusicWatchNextResultsRenderer": {
+                    "tabbedRenderer": {
+                        "watchNextTabbedResultsRenderer": {
+                            "tabs": [{
+                                "tabRenderer": {
+                                    "content": {
+                                        "musicQueueRenderer": {
+                                            "content": {
+                                                "playlistPanelRenderer": {
+                                                    "contents": [{
+                                                        "playlistPanelVideoRenderer": {
+                                                            "videoId": "v1",
+                                                            "title": {"runs": [{"text": "Seed"}]},
+                                                            "longBylineText": {"runs": [{"text": "Artist"}]},
+                                                            "lengthText": {"runs": [{"text": "3:05"}]},
+                                                            "thumbnail": {"thumbnails": [{"url": "small"}, {"url": "large"}]}
+                                                        }
+                                                    }, {
+                                                        "playlistPanelVideoRenderer": {
+                                                            "videoId": "v2",
+                                                            "title": {"runs": [{"text": "Next"}]}
+                                                        }
+                                                    }],
+                                                    "continuations": [{
+                                                        "nextRadioContinuationData": {
+                                                            "continuation": "radio-next"
+                                                        }
+                                                    }]
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        let normalized = normalize_radio_response("v1", 10, &response);
+        assert_eq!(
+            normalized
+                .pointer("/sources/0/kind")
+                .and_then(Value::as_str),
+            Some("youtube-music-radio")
+        );
+        assert_eq!(
+            normalized
+                .pointer("/sources/0/items/0/id")
+                .and_then(Value::as_str),
+            Some("v1")
+        );
+        assert_eq!(
+            normalized
+                .pointer("/sources/0/items/0/duration")
+                .and_then(Value::as_u64),
+            Some(185)
+        );
+        assert_eq!(
+            normalized
+                .pointer("/sources/0/continuation")
+                .and_then(Value::as_str),
+            Some("radio-next")
+        );
+    }
+
+    #[test]
+    fn normalizes_add_to_playlist_options() {
+        let response = json!({
+            "addToPlaylistRenderer": {
+                "title": {"runs": [{"text": "Add to playlist"}]},
+                "contents": [{
+                    "playlistAddToOptionRenderer": {
+                        "playlistId": "PL1",
+                        "title": {"runs": [{"text": "Road songs"}]},
+                        "subtitle": {"runs": [{"text": "Private"}]},
+                        "selected": false
+                    }
+                }, {
+                    "playlistAddToOptionRenderer": {
+                        "playlistId": "PL1",
+                        "title": {"runs": [{"text": "Duplicate"}]}
+                    }
+                }],
+                "createPlaylistEndpoint": {}
+            }
+        });
+        let normalized = normalize_add_to_playlist_options(&response);
+        let options = normalized
+            .get("options")
+            .and_then(Value::as_array)
+            .expect("options");
+        assert_eq!(options.len(), 1);
+        assert_eq!(
+            options[0].get("playlist-id").and_then(Value::as_str),
+            Some("PL1")
+        );
+        assert_eq!(
+            options[0].get("title").and_then(Value::as_str),
+            Some("Road songs")
+        );
+        assert_eq!(
+            normalized
+                .get("can-create-playlist")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parses_song_library_state_tokens() {
+        let response = json!({
+            "contents": {
+                "singleColumnMusicWatchNextResultsRenderer": {
+                    "tabbedRenderer": {
+                        "watchNextTabbedResultsRenderer": {
+                            "tabs": [{
+                                "tabRenderer": {
+                                    "content": {
+                                        "musicQueueRenderer": {
+                                            "content": {
+                                                "playlistPanelRenderer": {
+                                                    "contents": [{
+                                                        "playlistPanelVideoRenderer": {
+                                                            "videoId": "v1",
+                                                            "title": {"runs": [{"text": "Song"}]},
+                                                            "menu": {
+                                                                "menuRenderer": {
+                                                                    "items": [{
+                                                                        "toggleMenuServiceItemRenderer": {
+                                                                            "defaultIcon": {"iconType": "LIBRARY_ADD"},
+                                                                            "defaultServiceEndpoint": {
+                                                                                "feedbackEndpoint": {"feedbackToken": "add-token"}
+                                                                            },
+                                                                            "toggledServiceEndpoint": {
+                                                                                "feedbackEndpoint": {"feedbackToken": "remove-token"}
+                                                                            }
+                                                                        }
+                                                                    }],
+                                                                    "topLevelButtons": [{
+                                                                        "likeButtonRenderer": {"likeStatus": "LIKE"}
+                                                                    }]
+                                                                }
+                                                            }
+                                                        }
+                                                    }]
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        let state = song_library_state(&response, "v1").unwrap();
+        assert!(!state.in_library);
+        assert_eq!(state.add_token.as_deref(), Some("add-token"));
+        assert_eq!(state.remove_token.as_deref(), Some("remove-token"));
+        assert_eq!(state.like_status.as_deref(), Some("like"));
+    }
+
+    #[test]
+    fn song_library_state_requires_matching_video_id() {
+        let response = json!({
+            "contents": [{
+                "playlistPanelVideoRenderer": {
+                    "videoId": "other-video",
+                    "title": {"runs": [{"text": "Other"}]},
+                    "menu": {
+                        "menuRenderer": {
+                            "items": [{
+                                "toggleMenuServiceItemRenderer": {
+                                    "defaultIcon": {"iconType": "LIBRARY_ADD"},
+                                    "defaultServiceEndpoint": {
+                                        "feedbackEndpoint": {"feedbackToken": "wrong-add-token"}
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }]
+        });
+        let error = song_library_state(&response, "target-id").unwrap_err();
+        assert!(error.contains("target-id"));
+    }
+
+    #[test]
     fn preserves_non_track_music_cards() {
         let response = json!({
             "contents": [{
@@ -3280,6 +4145,148 @@ mod tests {
             sources[1].get("title").and_then(Value::as_str),
             Some("Songs")
         );
+    }
+
+    #[test]
+    fn normalizes_search_item_sections_after_top_result() {
+        let response = json!({
+            "contents": {
+                "tabbedSearchResultsRenderer": {
+                    "tabs": [{
+                        "tabRenderer": {
+                            "title": "YT Music",
+                            "selected": true,
+                            "content": {
+                                "sectionListRenderer": {
+                                    "contents": [{
+                                        "musicCardShelfRenderer": {
+                                            "title": {"runs": [{
+                                                "text": "'00s R&B Chill",
+                                                "navigationEndpoint": {
+                                                    "browseEndpoint": {
+                                                        "browseId": "VLRDCHILL"
+                                                    }
+                                                }
+                                            }]},
+                                            "subtitle": {"runs": [
+                                                {"text": "Playlist"},
+                                                {"text": " • "},
+                                                {"text": "YouTube Music"}
+                                            ]},
+                                            "thumbnail": {"musicThumbnailRenderer": {
+                                                "thumbnail": {"thumbnails": [{"url": "playlist-thumb"}]}
+                                            }}
+                                        }
+                                    }, {
+                                        "itemSectionRenderer": {
+                                            "contents": [{
+                                                "musicResponsiveListItemRenderer": {
+                                                    "flexColumns": [{
+                                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                                            "text": {"runs": [{"text": "Chill Girl"}]}
+                                                        }
+                                                    }, {
+                                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                                            "text": {"runs": [
+                                                                {"text": "Song"},
+                                                                {"text": " • "},
+                                                                {"text": "CeeProlific"}
+                                                            ]}
+                                                        }
+                                                    }],
+                                                    "navigationEndpoint": {
+                                                        "watchEndpoint": {"videoId": "song1"}
+                                                    }
+                                                }
+                                            }]
+                                        }
+                                    }, {
+                                        "itemSectionRenderer": {
+                                            "contents": [{
+                                                "musicResponsiveListItemRenderer": {
+                                                    "flexColumns": [{
+                                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                                            "text": {"runs": [{"text": "Different Dinner Table"}]}
+                                                        }
+                                                    }, {
+                                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                                            "text": {"runs": [
+                                                                {"text": "Song"},
+                                                                {"text": " • "},
+                                                                {"text": "Chill girl Vibes"}
+                                                            ]}
+                                                        }
+                                                    }],
+                                                    "navigationEndpoint": {
+                                                        "watchEndpoint": {"videoId": "song2"}
+                                                    }
+                                                }
+                                            }]
+                                        }
+                                    }]
+                                }
+                            }
+                        }
+                    }, {
+                        "tabRenderer": {
+                            "title": "Library",
+                            "content": {
+                                "sectionListRenderer": {
+                                    "contents": [{
+                                        "itemSectionRenderer": {
+                                            "contents": [{
+                                                "musicResponsiveListItemRenderer": {
+                                                    "flexColumns": [{
+                                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                                            "text": {"runs": [{"text": "Library-only"}]}
+                                                        }
+                                                    }],
+                                                    "navigationEndpoint": {
+                                                        "watchEndpoint": {"videoId": "library"}
+                                                    }
+                                                }
+                                            }]
+                                        }
+                                    }]
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+        let normalized = normalize_search_response("chill girl", 10, &response);
+        let sources = normalized
+            .get("sources")
+            .and_then(Value::as_array)
+            .expect("sources");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources[0].get("title").and_then(Value::as_str),
+            Some("Top result")
+        );
+        assert_eq!(
+            sources[0].pointer("/items/0/title").and_then(Value::as_str),
+            Some("'00s R&B Chill")
+        );
+        assert_eq!(
+            sources[1].get("title").and_then(Value::as_str),
+            Some("Results")
+        );
+        assert_eq!(
+            sources[1].pointer("/items/0/id").and_then(Value::as_str),
+            Some("song1")
+        );
+        assert_eq!(
+            sources[1].pointer("/items/1/id").and_then(Value::as_str),
+            Some("song2")
+        );
+        assert!(sources[1]
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("items")
+            .iter()
+            .all(|item| item.get("id").and_then(Value::as_str) != Some("library")));
     }
 
     #[test]

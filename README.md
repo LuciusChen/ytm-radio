@@ -2,9 +2,9 @@
 
 An experimental Emacs audio player for YouTube and YouTube Music.
 
-The design follows the useful part of `ytr`: `yt-dlp` discovers URL metadata,
-and `mpv` plays audio with video disabled. Emacs owns the catalog, playback
-state, selection commands, and UI.
+`yt-dlp` discovers URL metadata for URL imports, and `mpv` plays audio with
+video disabled. Emacs owns the catalog, playback state, selection commands,
+and UI.
 
 YouTube Music account access is a separate Rust CLI. It is not an Emacs
 dynamic module and does not run as a resident service. Emacs starts one
@@ -21,6 +21,7 @@ Implemented:
 - show YouTube Music browse pages in a regular buffer;
 - show the current cover, playback progress, and controls in a child-frame
   now-playing view;
+- expose current-track actions through a transient menu;
 - invoke an external Rust account helper;
 - import YouTube Music auth through a browser login window and the
   browser's DevTools protocol;
@@ -46,6 +47,7 @@ YouTube Music page instead of hardcoding the API key.
 ## Requirements
 
 - Emacs 29.1 or newer
+- `transient`
 - `yt-dlp`
 - `mpv`
 - a Rust toolchain for building the optional account helper
@@ -80,9 +82,9 @@ Home, Explore, and Library use cached sections first and only load asynchronousl
 when a view has no cached data or when explicitly refreshed. Home continuation
 pages load lazily when the visible Home buffer reaches the rendered end.
 
-The child frame is a ytr-style now-playing surface. It fits itself to the
-current cover image, shows title, artist, time, and progress, and exposes the
-core playback controls without turning the child frame into the main browser.
+The child frame is a compact now-playing surface. It fits itself to the current
+cover image, shows title, artist, time, and progress, and exposes the core
+playback controls without turning the child frame into the main browser.
 
 The default helper path points to:
 
@@ -109,7 +111,7 @@ directory, and the auth file are visible from Emacs.
 - `M-x ytm-radio-home` switches to Home.
 - `M-x ytm-radio-explore` switches to Explore.
 - `M-x ytm-radio-library` switches to Library.
-- `M-x ytm-radio-add-url` adds a YouTube or YouTube Music URL.
+- `M-x ytm-radio-add-url` adds a YouTube or YouTube Music URL asynchronously.
 - `M-x ytm-radio-import-ytmusic-library` imports library sources.
 - `M-x ytm-radio-import-ytmusic-home` imports home recommendations.
 - `M-x ytm-radio-more` opens hidden items in the current section.
@@ -119,8 +121,23 @@ directory, and the auth file are visible from Emacs.
 - `M-x ytm-radio-refresh` refreshes the current browser view.
 - `M-x ytm-radio-search` searches YouTube Music.
 - `M-x ytm-radio-now-playing` shows the cover child frame.
+- `M-x ytm-radio-queue` shows the current runtime playback queue.
 - `M-x ytm-radio-play-track` selects a known track.
 - `M-x ytm-radio-play-source` selects a known source.
+- `M-x ytm-radio-current-actions` opens actions for the current track.
+- `M-x ytm-radio-like-current-track` likes or unlikes the current track.
+- `M-x ytm-radio-dislike-current-track` dislikes or undislikes the current
+  track.
+- `M-x ytm-radio-toggle-current-track-library` saves or removes the current
+  track from the YouTube Music library.
+- `M-x ytm-radio-start-current-track-mix` starts a YouTube Music mix queue from
+  the current track.
+- `M-x ytm-radio-add-current-track-to-playlist` adds the current track to a
+  selected YouTube Music playlist.
+- `M-x ytm-radio-play-current-track-next` inserts the current track after the
+  current runtime queue position.
+- `M-x ytm-radio-add-current-track-to-queue` appends the current track to the
+  runtime queue.
 - `M-x ytm-radio-toggle-pause` toggles mpv pause.
 - `M-x ytm-radio-cycle-repeat` cycles repeat off, all, and one.
 - `M-x ytm-radio-toggle-shuffle` toggles shuffle playback.
@@ -155,7 +172,14 @@ Inside the browser buffer:
 | `SPC` | Toggle pause |
 | `n` | Next track |
 | `p` | Previous track |
+| `A` | Open current-track actions |
+| `l` | Like or unlike the current track |
+| `d` | Dislike or undislike the current track |
+| `R` | Start mix from the current track |
+| `P` | Add current track to a playlist |
+| `t` | Save or remove current track from library |
 | `S` | Copy current track URL |
+| `Q` | Show the runtime queue |
 | `f` | Seek forward |
 | `B` | Seek backward |
 | `q` | Hide the browser buffer |
@@ -172,7 +196,14 @@ Inside the now-playing child frame:
 | `p` | Previous track |
 | `r` | Cycle repeat mode |
 | `s` | Toggle shuffle |
+| `A` | Open current-track actions |
+| `l` | Like or unlike the current track |
+| `d` | Dislike or undislike the current track |
+| `R` | Start mix from the current track |
+| `P` | Add current track to a playlist |
+| `t` | Save or remove current track from library |
 | `S` | Copy current track URL |
+| `Q` | Show the runtime queue |
 | `q` | Hide the child frame |
 
 ## Helper Contract
@@ -192,6 +223,16 @@ ytm-radio-helper continuation TOKEN --auth FILE [--limit N]
 ytm-radio-helper continuation TOKEN --mock [--limit N]
 ytm-radio-helper search QUERY --auth FILE [--limit N]
 ytm-radio-helper search QUERY --mock [--limit N]
+ytm-radio-helper rate VIDEO_ID like|dislike|indifferent --auth FILE
+ytm-radio-helper rate VIDEO_ID like|dislike|indifferent --mock
+ytm-radio-helper radio VIDEO_ID --auth FILE [--limit N]
+ytm-radio-helper radio VIDEO_ID --mock [--limit N]
+ytm-radio-helper playlist-options VIDEO_ID --auth FILE
+ytm-radio-helper playlist-options VIDEO_ID --mock
+ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --auth FILE
+ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --mock
+ytm-radio-helper library VIDEO_ID toggle|save|remove --auth FILE
+ytm-radio-helper library VIDEO_ID toggle|save|remove --mock
 ```
 
 For `home`, `explore`, and `library`, the helper preserves YouTube Music
@@ -205,6 +246,20 @@ result items.
 playlists without sending YouTube Music-only pages through yt-dlp. When YouTube
 Music returns endpoint `params`, the Emacs UI passes them through `--params`
 because some playlist and mix pages reject a bare `browseId`.
+`rate` is used by the current-track actions menu and maps to YouTube Music's
+like, dislike, and remove-rating endpoints.
+`VIDEO_ID` arguments must be 11-character YouTube video ids.
+`radio` loads a YouTube Music mix queue from a seed video id.
+`playlist-options` returns writable playlists for a video, and
+`add-to-playlist` adds the video to the selected playlist.
+`library` toggles, saves, or removes the current song through YouTube Music
+feedback tokens fetched by the helper.
+
+URL imports remain a general `yt-dlp` compatibility path. They do not store
+YouTube Music menu tokens, but actions that only need a video id, such as
+like, dislike, radio, and add-to-playlist, can still work when the imported
+track URL or id contains a YouTube video id. Library save/remove fetches the
+needed token at action time through the helper.
 
 Responses use a stable envelope:
 
@@ -393,3 +448,7 @@ make check
 
 This byte-compiles Elisp, runs ERT, checkdoc, package-lint, Rust formatting,
 Clippy, and unit tests.
+
+## License
+
+ytm-radio is licensed under GPL-3.0-or-later. See [LICENSE](LICENSE).
