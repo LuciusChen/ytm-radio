@@ -192,9 +192,11 @@ WebDriver BiDi."
                  string)
   :group 'ytm-radio)
 
-(defcustom ytm-radio-helper-login-profile-directory nil
-  "Optional isolated browser profile directory used for account login.
-When nil, the helper opens the login browser with its normal profile."
+(defcustom ytm-radio-helper-login-profile-directory
+  (expand-file-name "login-profile/" ytm-radio-data-directory)
+  "Isolated browser profile directory used for account login.
+Chrome 136 and newer require a non-default profile for DevTools login.
+Set this to nil to ask the helper to use the browser's normal profile."
   :type '(choice (const :tag "Use normal browser profile" nil)
                  directory)
   :group 'ytm-radio)

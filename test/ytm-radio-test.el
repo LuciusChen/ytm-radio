@@ -3136,9 +3136,9 @@
         "dia")))))
 
 (ert-deftest ytm-radio-helper-login-arguments-auto-browser ()
-  "Omit --browser when the helper should use the default browser."
+  "Use the default browser with the isolated login profile."
   (let ((ytm-radio-helper-login-browser nil)
-        (ytm-radio-helper-login-profile-directory nil)
+        (ytm-radio-helper-login-profile-directory "/tmp/ytm-login-profile")
         (ytm-radio-helper-login-cdp-port 29999)
         (ytm-radio-helper-login-timeout 60))
     (should
@@ -3151,7 +3151,15 @@
         "--port"
         "29999"
         "--timeout-secs"
-        "60")))))
+        "60"
+        "--profile-dir"
+        "/tmp/ytm-login-profile")))))
+
+(ert-deftest ytm-radio-helper-login-profile-default-is-isolated ()
+  "Default account login to an isolated browser profile."
+  (should (equal ytm-radio-helper-login-profile-directory
+                 (expand-file-name "login-profile/"
+                                   ytm-radio-data-directory))))
 
 (ert-deftest ytm-radio-helper-login-arguments-restart-running ()
   "Pass --restart-running only for confirmed browser restart retries."

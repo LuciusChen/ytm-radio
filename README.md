@@ -306,15 +306,16 @@ If the helper reports that an existing auth file is rejected, for example with
 HTTP 401 Unauthorized or HTTP 403 Forbidden, ytm-radio clears account-derived
 cache, opens the same login flow, and retries the original action after login.
 
-ytm-radio opens the login browser at `https://music.youtube.com` with the
-browser's normal profile by default. Sign in there if needed. The helper waits
+ytm-radio opens the login browser at `https://music.youtube.com` with an
+isolated ytm-radio profile by default. Sign in there if needed. The helper waits
 for the logged-in YouTube Music page to expose cookies and page context, then
 writes the auth JSON.
 
-The login browser must be started with a local DevTools endpoint. If the
-browser is already running without that endpoint, ytm-radio asks before
-restarting it once. This avoids launching a second Dia instance while still
-letting the existing normal browser profile be reused after restart.
+The login browser must be started with a local DevTools endpoint. If you opt
+into the browser's normal profile and that browser is already running without
+the endpoint, ytm-radio asks before restarting it once. The default isolated
+Chrome profile avoids this conflict and satisfies Chrome's DevTools profile
+requirement.
 
 The login flow:
 
@@ -355,13 +356,18 @@ you want a specific browser. Use `chrome`, `brave`, `edge`, `chromium`,
 (setq ytm-radio-helper-login-browser "chrome")
 ```
 
-By default, login uses the browser's normal profile. If you want an isolated
-login profile instead, set:
+By default, login uses an isolated profile under `~/.ytm-radio/login-profile/`.
+Chrome 136 and newer do not enable DevTools for the default Chrome profile, so
+the isolated profile is required for reliable Chrome login. If you want a
+different isolated login profile, set:
 
 ```elisp
 (setq ytm-radio-helper-login-profile-directory
       "~/.ytm-radio/login-profile/")
 ```
+
+Set `ytm-radio-helper-login-profile-directory` to nil only if the selected
+browser supports remote control with its normal profile.
 
 Firefox is supported through WebDriver BiDi. If Firefox is already running
 without the helper's remote control port, close it before login or configure an
