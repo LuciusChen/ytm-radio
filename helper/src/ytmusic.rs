@@ -282,14 +282,11 @@ pub fn library(
         other => return Err(format!("unknown library action `{other}`")),
     };
     if let Some(token) = token {
-        let body = json!({
-            "context": youtubei_context(auth, &bootstrap),
-            "feedbackTokens": [token]
-        });
-        request_youtubei_path(&client, auth, &bootstrap, "feedback", &body, None, 0)?;
+        apply_feedback_token(&client, auth, &bootstrap, token)?;
         Ok(json!({
             "video-id": video_id,
             "in-library": target_in_library,
+            "like-status": state.like_status,
             "action": normalized_action,
             "changed": true
         }))
@@ -297,6 +294,7 @@ pub fn library(
         Ok(json!({
             "video-id": video_id,
             "in-library": target_in_library,
+            "like-status": state.like_status,
             "action": normalized_action,
             "changed": false
         }))
@@ -305,6 +303,184 @@ pub fn library(
             "YouTube Music did not return a {normalized_action} library token for `{video_id}`"
         ))
     }
+}
+
+pub fn item_library(
+    browse_id: &str,
+    params: Option<&str>,
+    action: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
+) -> Result<Value, String> {
+    let client = youtube_client(proxy)?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let response = request_browse_id(&client, auth, &bootstrap, browse_id, params, None)?;
+    let state = browse_header_state(&response);
+    let playlist_id = item_library_playlist_id(browse_id, &response);
+    let (token, target_in_library, normalized_action) = match action {
+        "toggle" if state.in_library => (state.remove_token.as_deref(), false, "remove"),
+        "toggle" => (state.add_token.as_deref(), true, "save"),
+        "save" if state.in_library => (None, true, "save"),
+        "save" => (state.add_token.as_deref(), true, "save"),
+        "remove" if state.library_known && !state.in_library => (None, false, "remove"),
+        "remove" => (state.remove_token.as_deref(), false, "remove"),
+        other => return Err(format!("unknown library action `{other}`")),
+    };
+    if let Some(token) = token {
+        apply_feedback_token(&client, auth, &bootstrap, token)?;
+        Ok(json!({
+            "browse-id": browse_id,
+            "playlist-id": playlist_id,
+            "in-library": target_in_library,
+            "action": normalized_action,
+            "changed": true
+        }))
+    } else if state.library_known && state.in_library == target_in_library {
+        Ok(json!({
+            "browse-id": browse_id,
+            "playlist-id": playlist_id,
+            "in-library": target_in_library,
+            "action": normalized_action,
+            "changed": false
+        }))
+    } else if let Some(playlist_id) = playlist_id.as_deref() {
+        apply_playlist_library_rating(&client, auth, &bootstrap, playlist_id, target_in_library)?;
+        Ok(json!({
+            "browse-id": browse_id,
+            "playlist-id": playlist_id,
+            "in-library": target_in_library,
+            "action": normalized_action,
+            "changed": true
+        }))
+    } else {
+        Err(format!(
+            "YouTube Music did not return a {normalized_action} library token or playlist id for `{browse_id}`"
+        ))
+    }
+}
+
+pub fn subscription(
+    browse_id: &str,
+    params: Option<&str>,
+    action: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
+) -> Result<Value, String> {
+    let client = youtube_client(proxy)?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let response = request_browse_id(&client, auth, &bootstrap, browse_id, params, None)?;
+    let state = browse_header_state(&response);
+    let (endpoint, target_subscribed, normalized_action) = match action {
+        "toggle" if state.subscribed == Some(true) => {
+            (state.unsubscribe_endpoint.as_ref(), false, "unsubscribe")
+        }
+        "toggle" if state.subscribed == Some(false) => {
+            (state.subscribe_endpoint.as_ref(), true, "subscribe")
+        }
+        "toggle" => {
+            return Err(format!(
+                "YouTube Music did not return subscription state for `{browse_id}`"
+            ))
+        }
+        "subscribe" if state.subscribed == Some(true) => (None, true, "subscribe"),
+        "subscribe" => (state.subscribe_endpoint.as_ref(), true, "subscribe"),
+        "unsubscribe" if state.subscribed == Some(false) => (None, false, "unsubscribe"),
+        "unsubscribe" => (state.unsubscribe_endpoint.as_ref(), false, "unsubscribe"),
+        other => return Err(format!("unknown subscription action `{other}`")),
+    };
+    if state.subscribed == Some(target_subscribed) {
+        return Ok(json!({
+            "browse-id": browse_id,
+            "subscribed": target_subscribed,
+            "action": normalized_action,
+            "changed": false
+        }));
+    }
+    let fallback_endpoint;
+    let endpoint = if let Some(endpoint) = endpoint {
+        endpoint
+    } else {
+        fallback_endpoint = channel_subscription_endpoint(browse_id).ok_or_else(|| {
+            format!("YouTube Music did not return a {normalized_action} endpoint for `{browse_id}`")
+        })?;
+        &fallback_endpoint
+    };
+    request_subscription_endpoint(&client, auth, &bootstrap, normalized_action, endpoint)?;
+    let verified_subscribed = verify_subscription_state(
+        &client,
+        auth,
+        &bootstrap,
+        browse_id,
+        params,
+        target_subscribed,
+    )?;
+    if verified_subscribed != Some(target_subscribed) {
+        let current = verified_subscribed
+            .map(|subscribed| subscribed.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(format!(
+            "YouTube Music did not {normalized_action} `{browse_id}`; current subscription state is {current}"
+        ));
+    }
+    Ok(json!({
+        "browse-id": browse_id,
+        "subscribed": target_subscribed,
+        "action": normalized_action,
+        "changed": true
+    }))
+}
+
+fn apply_feedback_token(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    token: &str,
+) -> Result<(), String> {
+    let body = json!({
+        "context": youtubei_context(auth, bootstrap),
+        "feedbackTokens": [token]
+    });
+    request_youtubei_path(client, auth, bootstrap, "feedback", &body, None, 0)?;
+    Ok(())
+}
+
+fn apply_playlist_library_rating(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    playlist_id: &str,
+    in_library: bool,
+) -> Result<(), String> {
+    let path = if in_library {
+        "like/like"
+    } else {
+        "like/removelike"
+    };
+    let body = json!({
+        "context": youtubei_context(auth, bootstrap),
+        "target": { "playlistId": clean_playlist_id(playlist_id) }
+    });
+    request_youtubei_path(client, auth, bootstrap, path, &body, None, 0)?;
+    Ok(())
+}
+
+pub fn track_status(
+    video_id: &str,
+    auth: &AuthConfig,
+    bootstrap_cache: Option<&Path>,
+    proxy: Option<&str>,
+) -> Result<Value, String> {
+    let client = youtube_client(proxy)?;
+    let bootstrap = bootstrap_with_cache(&client, auth, bootstrap_cache)?;
+    let response = request_song_next(&client, auth, &bootstrap, video_id)?;
+    let state = song_library_state(&response, video_id)?;
+    Ok(json!({
+        "video-id": video_id,
+        "in-library": state.in_library,
+        "like-status": state.like_status
+    }))
 }
 
 #[derive(Clone, Debug)]
@@ -1401,6 +1577,7 @@ fn normalize_browse_id_response(browse_id: &str, limit: usize, response: &Value)
         let mut items = Vec::new();
         let mut seen = HashSet::new();
         collect_items(response, &mut items, &mut seen, limit);
+        let state = browse_header_state(response);
         return json!({
             "sources": [normalized_source_with_metadata(
                 format!("ytm:browse:{browse_id}"),
@@ -1412,10 +1589,14 @@ fn normalize_browse_id_response(browse_id: &str, limit: usize, response: &Value)
                     continuation: find_first_string_for_key(response, "continuation"),
                     subtitle: browse_response_subtitle(response, &title, kind),
                     thumbnail_url: browse_response_thumbnail_url(response),
+                    in_library: menu_state_in_library_value(&state),
+                    subscribed: state.subscribed,
+                    playlist_id: item_library_playlist_id(browse_id, response),
                 },
             )]
         });
     }
+    let state = browse_header_state(response);
     let mut sources = vec![normalized_source_with_metadata(
         format!("ytm:browse:{browse_id}:header"),
         kind,
@@ -1426,6 +1607,9 @@ fn normalize_browse_id_response(browse_id: &str, limit: usize, response: &Value)
             continuation: None,
             subtitle: browse_response_subtitle(response, &title, kind),
             thumbnail_url: browse_response_thumbnail_url(response),
+            in_library: menu_state_in_library_value(&state),
+            subscribed: state.subscribed,
+            playlist_id: item_library_playlist_id(browse_id, response),
         },
     )];
     sources.extend(sections.into_iter().enumerate().map(|(index, section)| {
@@ -1565,6 +1749,9 @@ struct SourceMetadata {
     continuation: Option<String>,
     subtitle: Option<String>,
     thumbnail_url: Option<String>,
+    in_library: Value,
+    subscribed: Option<bool>,
+    playlist_id: Option<String>,
 }
 
 fn normalized_source_with_metadata(
@@ -1583,6 +1770,9 @@ fn normalized_source_with_metadata(
         "items": items,
         "subtitle": metadata.subtitle,
         "thumbnail-url": metadata.thumbnail_url,
+        "in-library": metadata.in_library,
+        "subscribed": metadata.subscribed,
+        "playlist-id": metadata.playlist_id,
         "continuation": metadata.continuation
     })
 }
@@ -1738,15 +1928,25 @@ fn panel_byline_text(renderer: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
+#[derive(Debug, Clone)]
+struct SubscriptionEndpoint {
+    channel_ids: Vec<String>,
+    params: Option<String>,
+}
+
 #[derive(Debug, Default)]
-struct PanelMenuState {
+struct MenuState {
     in_library: bool,
+    library_known: bool,
     add_token: Option<String>,
     remove_token: Option<String>,
     like_status: Option<String>,
+    subscribed: Option<bool>,
+    subscribe_endpoint: Option<SubscriptionEndpoint>,
+    unsubscribe_endpoint: Option<SubscriptionEndpoint>,
 }
 
-fn song_library_state(response: &Value, video_id: &str) -> Result<PanelMenuState, String> {
+fn song_library_state(response: &Value, video_id: &str) -> Result<MenuState, String> {
     let renderer = find_playlist_panel_video_renderer(response, video_id)
         .ok_or_else(|| format!("YouTube Music did not return metadata for `{video_id}`"))?;
     Ok(panel_menu_state(renderer))
@@ -1771,32 +1971,99 @@ fn find_playlist_panel_video_renderer<'a>(value: &'a Value, video_id: &str) -> O
     }
 }
 
-fn panel_menu_state(renderer: &Value) -> PanelMenuState {
-    let mut state = PanelMenuState::default();
-    if let Some(menu_renderer) = renderer.pointer("/menu/menuRenderer") {
-        if let Some(items) = menu_renderer.get("items").and_then(Value::as_array) {
-            for item in items {
-                parse_menu_service_item(item, &mut state);
-                parse_toggle_menu_item(item, &mut state);
-            }
-        }
-        state.like_status = parse_like_status(menu_renderer);
+fn panel_menu_state(renderer: &Value) -> MenuState {
+    let mut state = MenuState::default();
+    collect_menu_state(renderer, &mut state);
+    state.like_status = parse_like_status(renderer);
+    state
+}
+
+fn menu_state_in_library_value(state: &MenuState) -> Value {
+    if state.library_known {
+        Value::Bool(state.in_library)
+    } else {
+        Value::Null
+    }
+}
+
+fn browse_header_state(response: &Value) -> MenuState {
+    let mut state = MenuState::default();
+    if let Some(header) = find_header_renderer(response) {
+        collect_menu_state(header, &mut state);
     }
     state
 }
 
-fn parse_menu_service_item(item: &Value, state: &mut PanelMenuState) {
-    let Some(renderer) = item.get("menuServiceItemRenderer") else {
-        return;
-    };
+fn collect_menu_state(value: &Value, state: &mut MenuState) {
+    match value {
+        Value::Object(object) => {
+            if let Some(renderer) = object.get("menuServiceItemRenderer") {
+                parse_menu_service_item(renderer, state);
+            }
+            if let Some(renderer) = object.get("toggleMenuServiceItemRenderer") {
+                parse_toggle_menu_item(renderer, state);
+            }
+            if let Some(renderer) = object.get("buttonRenderer") {
+                parse_button_renderer(renderer, state);
+            }
+            if let Some(renderer) = object.get("subscribeButtonRenderer") {
+                parse_subscribe_button_renderer(renderer, state);
+            }
+            if let Some(endpoint) = object
+                .get("subscribeEndpoint")
+                .and_then(subscription_endpoint_from_value)
+            {
+                state.subscribe_endpoint.get_or_insert(endpoint);
+                state.subscribed.get_or_insert(false);
+            }
+            if let Some(endpoint) = object
+                .get("unsubscribeEndpoint")
+                .and_then(subscription_endpoint_from_value)
+            {
+                state.unsubscribe_endpoint.get_or_insert(endpoint);
+                state.subscribed = Some(true);
+            }
+            if let Some(subscribed) = object.get("isSubscribed").and_then(Value::as_bool) {
+                state.subscribed = Some(subscribed);
+            }
+            for (key, nested) in object {
+                if matches!(
+                    key.as_str(),
+                    "buttonRenderer"
+                        | "menuServiceItemRenderer"
+                        | "subscribeButtonRenderer"
+                        | "toggleMenuServiceItemRenderer"
+                ) {
+                    continue;
+                }
+                collect_menu_state(nested, state);
+            }
+        }
+        Value::Array(array) => {
+            for nested in array {
+                collect_menu_state(nested, state);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_menu_service_item(renderer: &Value, state: &mut MenuState) {
     let icon_type = renderer
         .pointer("/icon/iconType")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let token = extract_feedback_token(renderer, "serviceEndpoint");
+    parse_action_text_state(renderer_label(renderer).as_deref(), state);
+    parse_subscription_service_endpoint(renderer, "serviceEndpoint", state, true);
+    parse_subscription_service_endpoint(renderer, "navigationEndpoint", state, true);
     match icon_type {
-        "LIBRARY_ADD" | "BOOKMARK_BORDER" => state.add_token = token,
+        "LIBRARY_ADD" | "BOOKMARK_BORDER" => {
+            state.library_known = true;
+            state.add_token = token;
+        }
         "LIBRARY_REMOVE" | "BOOKMARK" => {
+            state.library_known = true;
             state.in_library = true;
             state.remove_token = token;
         }
@@ -1804,27 +2071,143 @@ fn parse_menu_service_item(item: &Value, state: &mut PanelMenuState) {
     }
 }
 
-fn parse_toggle_menu_item(item: &Value, state: &mut PanelMenuState) {
-    let Some(renderer) = item.get("toggleMenuServiceItemRenderer") else {
-        return;
-    };
+fn parse_toggle_menu_item(renderer: &Value, state: &mut MenuState) {
     let icon_type = renderer
         .pointer("/defaultIcon/iconType")
         .and_then(Value::as_str)
         .unwrap_or_default();
     let default_token = extract_feedback_token(renderer, "defaultServiceEndpoint");
     let toggled_token = extract_feedback_token(renderer, "toggledServiceEndpoint");
+    parse_action_text_state(renderer_label(renderer).as_deref(), state);
+    parse_subscription_service_endpoint(renderer, "defaultServiceEndpoint", state, true);
+    parse_subscription_service_endpoint(renderer, "toggledServiceEndpoint", state, false);
     match icon_type {
         "LIBRARY_ADD" | "BOOKMARK_BORDER" => {
+            state.library_known = true;
             state.add_token = default_token;
             state.remove_token = toggled_token;
         }
         "LIBRARY_REMOVE" | "BOOKMARK" => {
+            state.library_known = true;
             state.in_library = true;
             state.remove_token = default_token;
             state.add_token = toggled_token;
         }
         _ => {}
+    }
+}
+
+fn parse_button_renderer(renderer: &Value, state: &mut MenuState) {
+    parse_action_text_state(renderer_label(renderer).as_deref(), state);
+    parse_subscription_service_endpoint(renderer, "serviceEndpoint", state, true);
+    parse_subscription_service_endpoint(renderer, "navigationEndpoint", state, true);
+}
+
+fn parse_subscribe_button_renderer(renderer: &Value, state: &mut MenuState) {
+    if let Some(subscribed) = renderer.get("subscribed").and_then(Value::as_bool) {
+        state.subscribed = Some(subscribed);
+    }
+    collect_subscription_endpoints(renderer, state);
+}
+
+fn renderer_label(renderer: &Value) -> Option<String> {
+    [
+        "/text/runs/0/text",
+        "/text/simpleText",
+        "/title/runs/0/text",
+        "/title/simpleText",
+        "/accessibility/accessibilityData/label",
+        "/accessibilityData/accessibilityData/label",
+    ]
+    .iter()
+    .find_map(|pointer| {
+        renderer
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| text.trim().to_string())
+    })
+    .or_else(|| first_text(renderer))
+}
+
+fn parse_action_text_state(text: Option<&str>, state: &mut MenuState) {
+    let Some(text) = text else {
+        return;
+    };
+    let lower = text.trim().to_ascii_lowercase();
+    if (lower.starts_with("save ") && lower.ends_with(" to library")) || lower == "save to library"
+    {
+        state.library_known = true;
+    } else if (lower.starts_with("remove ") && lower.ends_with(" from library"))
+        || lower == "remove from library"
+    {
+        state.library_known = true;
+        state.in_library = true;
+    } else if lower == "subscribed"
+        || lower == "unsubscribe"
+        || lower.starts_with("subscribed to")
+        || lower.starts_with("unsubscribe from")
+    {
+        state.subscribed = Some(true);
+    } else if lower == "subscribe" || lower.starts_with("subscribe to") {
+        state.subscribed.get_or_insert(false);
+    }
+}
+
+fn collect_subscription_endpoints(value: &Value, state: &mut MenuState) {
+    match value {
+        Value::Object(object) => {
+            if let Some(endpoint) = object
+                .get("subscribeEndpoint")
+                .and_then(subscription_endpoint_from_value)
+            {
+                state.subscribe_endpoint.get_or_insert(endpoint);
+            }
+            if let Some(endpoint) = object
+                .get("unsubscribeEndpoint")
+                .and_then(subscription_endpoint_from_value)
+            {
+                state.unsubscribe_endpoint.get_or_insert(endpoint);
+            }
+            for nested in object.values() {
+                collect_subscription_endpoints(nested, state);
+            }
+        }
+        Value::Array(array) => {
+            for nested in array {
+                collect_subscription_endpoints(nested, state);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_subscription_service_endpoint(
+    renderer: &Value,
+    key: &str,
+    state: &mut MenuState,
+    current: bool,
+) {
+    let Some(endpoint) = renderer.get(key) else {
+        return;
+    };
+    if let Some(subscribe) = endpoint
+        .get("subscribeEndpoint")
+        .and_then(subscription_endpoint_from_value)
+    {
+        state.subscribe_endpoint.get_or_insert(subscribe);
+        if current {
+            state.subscribed = Some(false);
+        }
+    }
+    if let Some(unsubscribe) = endpoint
+        .get("unsubscribeEndpoint")
+        .and_then(subscription_endpoint_from_value)
+    {
+        state.unsubscribe_endpoint.get_or_insert(unsubscribe);
+        if current {
+            state.subscribed = Some(true);
+        }
     }
 }
 
@@ -1838,21 +2221,140 @@ fn extract_feedback_token(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_like_status(menu_renderer: &Value) -> Option<String> {
-    let buttons = menu_renderer
-        .get("topLevelButtons")
-        .and_then(Value::as_array)?;
-    buttons.iter().find_map(|button| {
-        let status = button
-            .get("likeButtonRenderer")
-            .and_then(|renderer| renderer.get("likeStatus"))
-            .and_then(Value::as_str)?;
-        match status {
-            "LIKE" => Some("like".to_string()),
-            "DISLIKE" => Some("dislike".to_string()),
+fn subscription_endpoint_from_value(value: &Value) -> Option<SubscriptionEndpoint> {
+    let channel_ids = value
+        .get("channelIds")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|ids| !ids.is_empty())
+        .or_else(|| {
+            value
+                .get("channelId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| vec![id.to_string()])
+        })?;
+    let params = value
+        .get("params")
+        .and_then(Value::as_str)
+        .filter(|params| !params.trim().is_empty())
+        .map(str::to_string);
+    Some(SubscriptionEndpoint {
+        channel_ids,
+        params,
+    })
+}
+
+fn channel_subscription_endpoint(browse_id: &str) -> Option<SubscriptionEndpoint> {
+    (browse_id.starts_with("UC") && !browse_id.trim().is_empty()).then(|| SubscriptionEndpoint {
+        channel_ids: vec![browse_id.to_string()],
+        params: None,
+    })
+}
+
+fn request_subscription_endpoint(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    action: &str,
+    endpoint: &SubscriptionEndpoint,
+) -> Result<(), String> {
+    let path = match action {
+        "subscribe" => "subscription/subscribe",
+        "unsubscribe" => "subscription/unsubscribe",
+        other => return Err(format!("unknown subscription action `{other}`")),
+    };
+    let mut body = json!({
+        "context": youtubei_context(auth, bootstrap),
+        "channelIds": endpoint.channel_ids
+    });
+    if let Some(params) = endpoint.params.as_ref() {
+        if let Some(object) = body.as_object_mut() {
+            object.insert("params".to_string(), Value::String(params.clone()));
+        }
+    }
+    request_youtubei_path(client, auth, bootstrap, path, &body, None, 0)?;
+    Ok(())
+}
+
+fn verify_subscription_state(
+    client: &Client,
+    auth: &AuthConfig,
+    bootstrap: &Bootstrap,
+    browse_id: &str,
+    params: Option<&str>,
+    target_subscribed: bool,
+) -> Result<Option<bool>, String> {
+    for delay in [0, 300] {
+        if delay > 0 {
+            thread::sleep(Duration::from_millis(delay));
+        }
+        let response = request_browse_id(client, auth, bootstrap, browse_id, params, None)?;
+        let subscribed = browse_header_state(&response).subscribed;
+        if subscribed == Some(target_subscribed) {
+            return Ok(subscribed);
+        }
+    }
+    let response = request_browse_id(client, auth, bootstrap, browse_id, params, None)?;
+    Ok(browse_header_state(&response).subscribed)
+}
+
+fn parse_like_status(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(status) = object
+                .get("likeStatus")
+                .and_then(Value::as_str)
+                .and_then(normalize_like_status)
+            {
+                return Some(status);
+            }
+            if let Some(status) = object
+                .get("toggleButtonRenderer")
+                .and_then(parse_toggle_like_status)
+            {
+                return Some(status);
+            }
+            object.values().find_map(parse_like_status)
+        }
+        Value::Array(array) => array.iter().find_map(parse_like_status),
+        _ => None,
+    }
+}
+
+fn normalize_like_status(status: &str) -> Option<String> {
+    match status {
+        "LIKE" => Some("like".to_string()),
+        "DISLIKE" => Some("dislike".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_toggle_like_status(renderer: &Value) -> Option<String> {
+    if renderer
+        .get("isToggled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let icon_type = renderer
+            .pointer("/defaultIcon/iconType")
+            .or_else(|| renderer.pointer("/toggledIcon/iconType"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match icon_type {
+            "LIKE" | "THUMB_UP" | "THUMB_UP_OUTLINE" => Some("like".to_string()),
+            "DISLIKE" | "THUMB_DOWN" | "THUMB_DOWN_OUTLINE" => Some("dislike".to_string()),
             _ => None,
         }
-    })
+    } else {
+        None
+    }
 }
 
 fn find_radio_continuation(value: &Value) -> Option<String> {
@@ -1958,6 +2460,44 @@ fn find_playlist_id(value: &Value) -> Option<String> {
         Value::Array(array) => array.iter().find_map(find_playlist_id),
         _ => None,
     }
+}
+
+fn item_library_playlist_id(browse_id: &str, response: &Value) -> Option<String> {
+    find_library_playlist_id(response)
+        .or_else(|| browse_id_playlist_id(browse_id))
+        .map(|id| clean_playlist_id(&id).to_string())
+}
+
+fn browse_id_playlist_id(browse_id: &str) -> Option<String> {
+    let browse_id = browse_id.trim();
+    (!browse_id.is_empty() && (browse_id.starts_with("VL") || browse_id.starts_with("PL")))
+        .then(|| browse_id.to_string())
+}
+
+fn find_library_playlist_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(playlist_id) = object
+                .get("playlistId")
+                .and_then(Value::as_str)
+                .filter(|id| is_library_playlist_id(id))
+            {
+                return Some(playlist_id.to_string());
+            }
+            object.values().find_map(find_library_playlist_id)
+        }
+        Value::Array(array) => array.iter().find_map(find_library_playlist_id),
+        _ => None,
+    }
+}
+
+fn is_library_playlist_id(playlist_id: &str) -> bool {
+    let playlist_id = playlist_id.trim();
+    !playlist_id.is_empty()
+        && !playlist_id.starts_with("RD")
+        && !playlist_id.starts_with("LM")
+        && !playlist_id.starts_with("RDAMVM")
+        && !playlist_id.starts_with("RDAMP")
 }
 
 fn find_first_bool_for_key(value: &Value, key: &str) -> Option<bool> {
@@ -2388,6 +2928,7 @@ fn parse_card_shelf_header(renderer: &Value) -> Option<Value> {
         })
         .or_else(|| find_best_thumbnail(renderer));
     let url = item_url(&kind, browse_id.as_deref(), playlist_id.as_deref());
+    let state = panel_menu_state(renderer);
     let mut item = Map::from_iter([
         ("type".to_string(), Value::String(kind)),
         ("id".to_string(), Value::String(id)),
@@ -2423,6 +2964,14 @@ fn parse_card_shelf_header(renderer: &Value) -> Option<Value> {
         (
             "thumbnail-url".to_string(),
             thumbnail_url.map(Value::String).unwrap_or(Value::Null),
+        ),
+        (
+            "in-library".to_string(),
+            menu_state_in_library_value(&state),
+        ),
+        (
+            "subscribed".to_string(),
+            state.subscribed.map(Value::Bool).unwrap_or(Value::Null),
         ),
     ]);
     Some(Value::Object(std::mem::take(&mut item)))
@@ -2484,6 +3033,7 @@ fn parse_track(renderer: &Value) -> Option<Value> {
         .map(|run| run.text.clone());
     let duration = runs.iter().find_map(|run| parse_duration(&run.text));
     let thumbnail_url = find_best_thumbnail(renderer);
+    let menu = panel_menu_state(renderer);
     let mut item = Map::from_iter([
         ("type".to_string(), Value::String(kind)),
         ("id".to_string(), Value::String(video_id.clone())),
@@ -2508,6 +3058,11 @@ fn parse_track(renderer: &Value) -> Option<Value> {
             "thumbnail-url".to_string(),
             thumbnail_url.map(Value::String).unwrap_or(Value::Null),
         ),
+        (
+            "like-status".to_string(),
+            menu.like_status.map(Value::String).unwrap_or(Value::Null),
+        ),
+        ("in-library".to_string(), Value::Bool(menu.in_library)),
     ]);
     Some(Value::Object(std::mem::take(&mut item)))
 }
@@ -2551,6 +3106,7 @@ fn parse_card(renderer: &Value) -> Option<Value> {
     let metadata = metadata_tokens(&title, &metadata_runs);
     let thumbnail_url = find_best_thumbnail(renderer);
     let url = item_url(&kind, browse_id.as_deref(), playlist_id.as_deref());
+    let state = panel_menu_state(renderer);
     let mut item = Map::from_iter([
         ("type".to_string(), Value::String(kind)),
         ("id".to_string(), Value::String(id)),
@@ -2586,6 +3142,14 @@ fn parse_card(renderer: &Value) -> Option<Value> {
         (
             "thumbnail-url".to_string(),
             thumbnail_url.map(Value::String).unwrap_or(Value::Null),
+        ),
+        (
+            "in-library".to_string(),
+            menu_state_in_library_value(&state),
+        ),
+        (
+            "subscribed".to_string(),
+            state.subscribed.map(Value::Bool).unwrap_or(Value::Null),
         ),
     ]);
     Some(Value::Object(std::mem::take(&mut item)))
@@ -3266,7 +3830,19 @@ mod tests {
                     }}],
                     "thumbnail": {"musicThumbnailRenderer": {
                         "thumbnail": {"thumbnails": [{"url": "small"}, {"url": "large"}]}
-                    }}
+                    }},
+                    "menu": {
+                        "menuRenderer": {
+                            "items": [{
+                                "toggleMenuServiceItemRenderer": {
+                                    "defaultIcon": {"iconType": "LIBRARY_REMOVE"}
+                                }
+                            }],
+                            "topLevelButtons": [{
+                                "likeButtonRenderer": {"likeStatus": "LIKE"}
+                            }]
+                        }
+                    }
                 }
             }]
         });
@@ -3280,6 +3856,38 @@ mod tests {
             track.get("thumbnail-url").and_then(Value::as_str),
             Some("large")
         );
+        assert_eq!(
+            track.get("like-status").and_then(Value::as_str),
+            Some("like")
+        );
+        assert_eq!(track.get("in-library").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn parses_segmented_like_status() {
+        let renderer = json!({
+            "menu": {
+                "menuRenderer": {
+                    "topLevelButtons": [{
+                        "segmentedLikeDislikeButtonRenderer": {
+                            "likeButton": {
+                                "toggleButtonRenderer": {
+                                    "isToggled": false,
+                                    "defaultIcon": {"iconType": "LIKE"}
+                                }
+                            },
+                            "dislikeButton": {
+                                "toggleButtonRenderer": {
+                                    "isToggled": true,
+                                    "defaultIcon": {"iconType": "DISLIKE"}
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+        assert_eq!(parse_like_status(&renderer).as_deref(), Some("dislike"));
     }
 
     #[test]
@@ -3448,6 +4056,118 @@ mod tests {
         assert_eq!(state.add_token.as_deref(), Some("add-token"));
         assert_eq!(state.remove_token.as_deref(), Some("remove-token"));
         assert_eq!(state.like_status.as_deref(), Some("like"));
+    }
+
+    #[test]
+    fn subscription_toggle_state_uses_default_subscribe_endpoint() {
+        let renderer = json!({
+            "toggleMenuServiceItemRenderer": {
+                "text": {"runs": [{"text": "Subscribe"}]},
+                "defaultServiceEndpoint": {
+                    "subscribeEndpoint": {"channelIds": ["UC1"]}
+                },
+                "toggledServiceEndpoint": {
+                    "unsubscribeEndpoint": {"channelIds": ["UC1"]},
+                    "label": "Unsubscribe"
+                }
+            }
+        });
+        let mut state = MenuState::default();
+        collect_menu_state(&renderer, &mut state);
+
+        assert_eq!(state.subscribed, Some(false));
+        assert_eq!(
+            state
+                .subscribe_endpoint
+                .as_ref()
+                .and_then(|endpoint| endpoint.channel_ids.first())
+                .map(String::as_str),
+            Some("UC1")
+        );
+        assert!(state.unsubscribe_endpoint.is_some());
+    }
+
+    #[test]
+    fn subscription_toggle_state_uses_default_unsubscribe_endpoint() {
+        let renderer = json!({
+            "toggleMenuServiceItemRenderer": {
+                "text": {"runs": [{"text": "Unsubscribe"}]},
+                "defaultServiceEndpoint": {
+                    "unsubscribeEndpoint": {"channelIds": ["UC1"]}
+                },
+                "toggledServiceEndpoint": {
+                    "subscribeEndpoint": {"channelIds": ["UC1"]},
+                    "label": "Subscribe"
+                }
+            }
+        });
+        let mut state = MenuState::default();
+        collect_menu_state(&renderer, &mut state);
+
+        assert_eq!(state.subscribed, Some(true));
+        assert_eq!(
+            state
+                .unsubscribe_endpoint
+                .as_ref()
+                .and_then(|endpoint| endpoint.channel_ids.first())
+                .map(String::as_str),
+            Some("UC1")
+        );
+        assert!(state.subscribe_endpoint.is_some());
+    }
+
+    #[test]
+    fn subscription_button_state_uses_explicit_subscribed_flag() {
+        let renderer = json!({
+            "subscribeButtonRenderer": {
+                "channelId": "UC1",
+                "subscribed": false,
+                "unsubscribedButtonText": {"runs": [{"text": "Subscribe"}]},
+                "subscribedButtonText": {"runs": [{"text": "Subscribed"}]},
+                "serviceEndpoints": [
+                    {
+                        "subscribeEndpoint": {
+                            "channelIds": ["UC1"],
+                            "params": "subscribe-params"
+                        }
+                    },
+                    {
+                        "signalServiceEndpoint": {
+                            "actions": [{
+                                "openPopupAction": {
+                                    "popup": {
+                                        "confirmDialogRenderer": {
+                                            "confirmButton": {
+                                                "buttonRenderer": {
+                                                    "serviceEndpoint": {
+                                                        "unsubscribeEndpoint": {
+                                                            "channelIds": ["UC1"]
+                                                        }
+                                                    },
+                                                    "text": {"runs": [{"text": "Unsubscribe"}]}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                ]
+            }
+        });
+        let mut state = MenuState::default();
+        collect_menu_state(&renderer, &mut state);
+
+        assert_eq!(state.subscribed, Some(false));
+        assert_eq!(
+            state
+                .subscribe_endpoint
+                .as_ref()
+                .and_then(|endpoint| endpoint.params.as_deref()),
+            Some("subscribe-params")
+        );
+        assert!(state.unsubscribe_endpoint.is_some());
     }
 
     #[test]
@@ -3961,7 +4681,16 @@ mod tests {
                         {"text": "Save to playlist"},
                         {"text": "Playlist will play next"},
                         {"text": "Play next"}
-                    ]}
+                    ]},
+                    "menu": {"menuRenderer": {"items": [{
+                        "menuServiceItemRenderer": {
+                            "title": {"runs": [{"text": "Remove playlist from library"}]},
+                            "icon": {"iconType": "BOOKMARK"},
+                            "serviceEndpoint": {
+                                "feedbackEndpoint": {"feedbackToken": "remove-playlist"}
+                            }
+                        }
+                    }]}}
                 }
             }]
         });
@@ -3971,6 +4700,12 @@ mod tests {
                 .pointer("/sources/0/items/0/subtitle")
                 .and_then(Value::as_str),
             Some("Playlist - Evil Needle")
+        );
+        assert_eq!(
+            normalized
+                .pointer("/sources/0/items/0/in-library")
+                .and_then(Value::as_bool),
+            Some(true)
         );
     }
 
@@ -4054,6 +4789,14 @@ mod tests {
                             "thumbnail": {"musicThumbnailRenderer": {
                                 "thumbnail": {"thumbnails": [{"url": "artist-small"}, {"url": "artist-large"}]}
                             }},
+                            "buttons": [{
+                                "buttonRenderer": {
+                                    "text": {"runs": [{"text": "Subscribed"}]},
+                                    "serviceEndpoint": {
+                                        "unsubscribeEndpoint": {"channelIds": ["UCCHILL"]}
+                                    }
+                                }
+                            }],
                             "contents": [{
                                 "musicResponsiveListItemRenderer": {
                                     "flexColumns": [{
@@ -4143,6 +4886,12 @@ mod tests {
                 .pointer("/items/0/thumbnail-url")
                 .and_then(Value::as_str),
             Some("artist-large")
+        );
+        assert_eq!(
+            sources[0]
+                .pointer("/items/0/subscribed")
+                .and_then(Value::as_bool),
+            Some(true)
         );
         assert_eq!(
             sources[0].pointer("/items/1/type").and_then(Value::as_str),
@@ -4301,7 +5050,16 @@ mod tests {
         let response = json!({
             "header": {
                 "musicDetailHeaderRenderer": {
-                    "title": {"runs": [{"text": "Playlist Title"}]}
+                    "title": {"runs": [{"text": "Playlist Title"}]},
+                    "menu": {"menuRenderer": {"items": [{
+                        "menuServiceItemRenderer": {
+                            "title": {"runs": [{"text": "Remove playlist from library"}]},
+                            "icon": {"iconType": "BOOKMARK"},
+                            "serviceEndpoint": {
+                                "feedbackEndpoint": {"feedbackToken": "remove-playlist"}
+                            }
+                        }
+                    }]}}
                 }
             },
             "contents": [{
@@ -4326,6 +5084,14 @@ mod tests {
         assert_eq!(
             source.get("title").and_then(Value::as_str),
             Some("Playlist Title")
+        );
+        assert_eq!(
+            source.get("in-library").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            source.get("playlist-id").and_then(Value::as_str),
+            Some("PL1")
         );
         assert_eq!(
             source.pointer("/items/0/id").and_then(Value::as_str),
@@ -4377,6 +5143,56 @@ mod tests {
     }
 
     #[test]
+    fn album_detail_source_uses_album_playlist_id() {
+        let response = json!({
+            "header": {
+                "musicVisualHeaderRenderer": {
+                    "title": {"runs": [{"text": "Smoke Rings"}]}
+                }
+            },
+            "contents": {
+                "twoColumnBrowseResultsRenderer": {
+                    "secondaryContents": {
+                        "sectionListRenderer": {
+                            "contents": [{
+                                "musicShelfRenderer": {
+                                    "contents": [{
+                                        "musicResponsiveListItemRenderer": {
+                                            "flexColumns": [{
+                                                "musicResponsiveListItemFlexColumnRenderer": {
+                                                    "text": {"runs": [{
+                                                        "text": "Whiskey On My Mind",
+                                                        "navigationEndpoint": {
+                                                            "watchEndpoint": {
+                                                                "videoId": "z9fvoc5j828",
+                                                                "playlistId": "OLAK5uy_album"
+                                                            }
+                                                        }
+                                                    }]}
+                                                }
+                                            }]
+                                        }
+                                    }]
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            item_library_playlist_id("MPRE1", &response).as_deref(),
+            Some("OLAK5uy_album")
+        );
+        let normalized = normalize_browse_id_response("MPRE1", 10, &response);
+        let source = normalized.pointer("/sources/0").unwrap();
+        assert_eq!(
+            source.get("playlist-id").and_then(Value::as_str),
+            Some("OLAK5uy_album")
+        );
+    }
+
+    #[test]
     fn normalizes_browse_id_response_with_header_and_sections() {
         let response = json!({
             "header": {
@@ -4395,7 +5211,15 @@ mod tests {
                     ]},
                     "thumbnail": {"musicThumbnailRenderer": {
                         "thumbnail": {"thumbnails": [{"url": "avatar-small"}, {"url": "avatar-large"}]}
-                    }}
+                    }},
+                    "buttons": [{
+                        "buttonRenderer": {
+                            "text": {"runs": [{"text": "Subscribed"}]},
+                            "serviceEndpoint": {
+                                "unsubscribeEndpoint": {"channelIds": ["UCartist"]}
+                            }
+                        }
+                    }]
                 }
             },
             "contents": {
@@ -4459,6 +5283,10 @@ mod tests {
         assert_eq!(
             sources[0].get("thumbnail-url").and_then(Value::as_str),
             Some("avatar-large")
+        );
+        assert_eq!(
+            sources[0].get("subscribed").and_then(Value::as_bool),
+            Some(true)
         );
         assert_eq!(
             sources[1].get("title").and_then(Value::as_str),

@@ -12,7 +12,8 @@ use std::process;
 use std::time::Duration;
 use ytmusic::{
     add_to_playlist, bootstrap_cache_path, browse, browse_id as browse_detail, continuation,
-    library, playlist_options, radio, rate, search, BrowseTarget,
+    item_library, library, playlist_options, radio, rate, search, subscription, track_status,
+    BrowseTarget,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -58,6 +59,19 @@ enum Command {
     Library {
         video_id: String,
         action: String,
+    },
+    ItemLibrary {
+        browse_id: String,
+        params: Option<String>,
+        action: String,
+    },
+    Subscription {
+        browse_id: String,
+        params: Option<String>,
+        action: String,
+    },
+    TrackStatus {
+        video_id: String,
     },
 }
 
@@ -221,6 +235,7 @@ where
             json!({
                 "video-id": video_id,
                 "in-library": action != "remove",
+                "like-status": "like",
                 "action": action,
                 "changed": true
             })
@@ -228,6 +243,63 @@ where
         Command::Library { video_id, action } => {
             let (auth, cache_path) = load_auth_with_cache_path(&options)?;
             library(video_id, action, &auth, Some(&cache_path), proxy)?
+        }
+        Command::ItemLibrary {
+            browse_id, action, ..
+        } if options.mock_data => {
+            json!({
+                "browse-id": browse_id,
+                "in-library": action != "remove",
+                "action": action,
+                "changed": true
+            })
+        }
+        Command::ItemLibrary {
+            browse_id,
+            params,
+            action,
+        } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            item_library(
+                browse_id,
+                params.as_deref(),
+                action,
+                &auth,
+                Some(&cache_path),
+                proxy,
+            )?
+        }
+        Command::Subscription {
+            browse_id, action, ..
+        } if options.mock_data => {
+            json!({
+                "browse-id": browse_id,
+                "subscribed": action != "unsubscribe",
+                "action": action,
+                "changed": true
+            })
+        }
+        Command::Subscription {
+            browse_id,
+            params,
+            action,
+        } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            subscription(
+                browse_id,
+                params.as_deref(),
+                action,
+                &auth,
+                Some(&cache_path),
+                proxy,
+            )?
+        }
+        Command::TrackStatus { video_id } if options.mock_data => {
+            json!({ "video-id": video_id, "in-library": true, "like-status": "like" })
+        }
+        Command::TrackStatus { video_id } => {
+            let (auth, cache_path) = load_auth_with_cache_path(&options)?;
+            track_status(video_id, &auth, Some(&cache_path), proxy)?
         }
     };
     serde_json::to_string(&Envelope {
@@ -275,6 +347,9 @@ where
         "playlist-options" => parse_video_id_command(&mut args, "playlist-options")?,
         "add-to-playlist" => parse_add_to_playlist_command(&mut args)?,
         "library" => parse_library_command(&mut args)?,
+        "item-library" => parse_item_library_command(&mut args)?,
+        "subscription" => parse_subscription_command(&mut args)?,
+        "track-status" => parse_track_status_command(&mut args)?,
         "help" | "--help" | "-h" => return Err(usage()),
         other => return Err(format!("unknown command `{other}`")),
     };
@@ -377,6 +452,44 @@ where
             Command::BrowseId {
                 browse_id,
                 params: browse_params,
+            }
+        }
+        Command::ItemLibrary {
+            browse_id, action, ..
+        } => {
+            if browser.is_some()
+                || output.is_some()
+                || port.is_some()
+                || profile_dir.is_some()
+                || timeout_secs.is_some()
+                || initial_only
+                || restart_running
+            {
+                return Err("auth options require an auth action".to_string());
+            }
+            Command::ItemLibrary {
+                browse_id,
+                params: browse_params,
+                action,
+            }
+        }
+        Command::Subscription {
+            browse_id, action, ..
+        } => {
+            if browser.is_some()
+                || output.is_some()
+                || port.is_some()
+                || profile_dir.is_some()
+                || timeout_secs.is_some()
+                || initial_only
+                || restart_running
+            {
+                return Err("auth options require an auth action".to_string());
+            }
+            Command::Subscription {
+                browse_id,
+                params: browse_params,
+                action,
             }
         }
         Command::Browse(target) => {
@@ -560,6 +673,57 @@ fn parse_library_command(args: &mut Vec<String>) -> Result<Command, String> {
     }
 }
 
+fn parse_item_library_command(args: &mut Vec<String>) -> Result<Command, String> {
+    let browse_id = parse_required_browse_id(args)?;
+    let action = parse_required_action(args, "library")?;
+    match action.as_str() {
+        "toggle" | "save" | "remove" => Ok(Command::ItemLibrary {
+            browse_id,
+            params: None,
+            action,
+        }),
+        other => Err(format!("unknown library action `{other}`")),
+    }
+}
+
+fn parse_subscription_command(args: &mut Vec<String>) -> Result<Command, String> {
+    let browse_id = parse_required_browse_id(args)?;
+    let action = parse_required_action(args, "subscription")?;
+    match action.as_str() {
+        "toggle" | "subscribe" | "unsubscribe" => Ok(Command::Subscription {
+            browse_id,
+            params: None,
+            action,
+        }),
+        other => Err(format!("unknown subscription action `{other}`")),
+    }
+}
+
+fn parse_track_status_command(args: &mut Vec<String>) -> Result<Command, String> {
+    Ok(Command::TrackStatus {
+        video_id: parse_required_video_id(args)?,
+    })
+}
+
+fn parse_required_browse_id(args: &mut Vec<String>) -> Result<String, String> {
+    let Some(browse_id) = args.first().cloned() else {
+        return Err("expected browse id".to_string());
+    };
+    args.remove(0);
+    if browse_id.trim().is_empty() {
+        return Err("browse id must not be empty".to_string());
+    }
+    Ok(browse_id)
+}
+
+fn parse_required_action(args: &mut Vec<String>, command: &str) -> Result<String, String> {
+    let Some(action) = args.first().cloned() else {
+        return Err(format!("expected {command} action"));
+    };
+    args.remove(0);
+    Ok(action)
+}
+
 fn parse_required_video_id(args: &mut Vec<String>) -> Result<String, String> {
     let Some(video_id) = args.first().cloned() else {
         return Err("expected video id".to_string());
@@ -610,6 +774,12 @@ fn usage() -> String {
         "  ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --mock",
         "  ytm-radio-helper library VIDEO_ID toggle|save|remove --auth FILE",
         "  ytm-radio-helper library VIDEO_ID toggle|save|remove --mock",
+        "  ytm-radio-helper item-library BROWSE_ID toggle|save|remove --auth FILE [--params PARAMS]",
+        "  ytm-radio-helper item-library BROWSE_ID toggle|save|remove --mock [--params PARAMS]",
+        "  ytm-radio-helper subscription BROWSE_ID toggle|subscribe|unsubscribe --auth FILE [--params PARAMS]",
+        "  ytm-radio-helper subscription BROWSE_ID toggle|subscribe|unsubscribe --mock [--params PARAMS]",
+        "  ytm-radio-helper track-status VIDEO_ID --auth FILE",
+        "  ytm-radio-helper track-status VIDEO_ID --mock",
         "",
         "options:",
         "  --proxy URL  proxy YouTube Music request commands",
@@ -1285,6 +1455,40 @@ mod tests {
                 action: "toggle".to_string()
             }
         );
+        let item_library_options = parse_args([
+            "item-library",
+            "VLPL1",
+            "toggle",
+            "--params",
+            "gg",
+            "--mock",
+        ])
+        .unwrap();
+        assert_eq!(
+            item_library_options.command,
+            Command::ItemLibrary {
+                browse_id: "VLPL1".to_string(),
+                params: Some("gg".to_string()),
+                action: "toggle".to_string()
+            }
+        );
+        let subscription_options =
+            parse_args(["subscription", "UC123456789", "unsubscribe", "--mock"]).unwrap();
+        assert_eq!(
+            subscription_options.command,
+            Command::Subscription {
+                browse_id: "UC123456789".to_string(),
+                params: None,
+                action: "unsubscribe".to_string()
+            }
+        );
+        let status_options = parse_args(["track-status", VIDEO_ID, "--mock"]).unwrap();
+        assert_eq!(
+            status_options.command,
+            Command::TrackStatus {
+                video_id: VIDEO_ID.to_string()
+            }
+        );
     }
 
     #[test]
@@ -1426,6 +1630,19 @@ mod tests {
 
         let library_output = run(["library", VIDEO_ID, "toggle", "--mock"]).unwrap();
         assert!(library_output.contains(r#""in-library":true"#));
+        assert!(library_output.contains(r#""like-status":"like""#));
+
+        let item_library_output = run(["item-library", "VLPL1", "toggle", "--mock"]).unwrap();
+        assert!(item_library_output.contains(r#""browse-id":"VLPL1""#));
+        assert!(item_library_output.contains(r#""in-library":true"#));
+
+        let subscription_output = run(["subscription", "UC123456789", "toggle", "--mock"]).unwrap();
+        assert!(subscription_output.contains(r#""browse-id":"UC123456789""#));
+        assert!(subscription_output.contains(r#""subscribed":true"#));
+
+        let status_output = run(["track-status", VIDEO_ID, "--mock"]).unwrap();
+        assert!(status_output.contains(r#""in-library":true"#));
+        assert!(status_output.contains(r#""like-status":"like""#));
     }
 
     #[test]

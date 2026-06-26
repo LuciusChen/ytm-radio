@@ -26,7 +26,8 @@ Implemented:
 - import YouTube Music auth through a browser login window and the
   browser's DevTools protocol;
 - make authenticated YouTube Music home, explore, library, liked, detail,
-  search, radio/mix, playlist mutation, rating, and library mutation requests;
+  search, radio/mix, playlist mutation, rating, track status, library
+  mutation, item library, and subscription requests;
 - normalize live music renderers into playable tracks;
 - preserve non-track YouTube Music items such as albums, artists, playlists,
   and recommendation cards when they are present in browse responses;
@@ -34,8 +35,9 @@ Implemented:
   Emacs-native sections;
 - preserve browser positions across root-view switches and back navigation;
 - cache helper bootstrap data and short-lived account API responses;
-- save/remove library tracks, add tracks to playlists, start mixes, and manage
-  the runtime queue from current-track actions;
+- save/remove library tracks, add tracks to playlists, start mixes, save/remove
+  detail albums and playlists, subscribe/unsubscribe detail artists and channels,
+  and manage the runtime queue from current-track actions;
 - import deterministic mock account data;
 - reject unsupported helper JSON schema versions.
 
@@ -164,11 +166,16 @@ directory, and the auth file are visible from Emacs.
 - `M-x ytm-radio-play-track` selects a known track.
 - `M-x ytm-radio-play-source` selects a known source.
 - `M-x ytm-radio-current-actions` opens actions for the current track.
-- `M-x ytm-radio-like-current-track` likes or unlikes the current track.
-- `M-x ytm-radio-dislike-current-track` dislikes or undislikes the current
-  track.
+- `M-x ytm-radio-like-current-track` likes the current track or clears an
+  existing like.
+- `M-x ytm-radio-dislike-current-track` dislikes the current track or clears an
+  existing dislike.
 - `M-x ytm-radio-toggle-current-track-library` saves or removes the current
   track from the YouTube Music library.
+- `M-x ytm-radio-toggle-detail-library` saves or removes the current album or
+  playlist detail from the YouTube Music library.
+- `M-x ytm-radio-toggle-detail-subscription` subscribes or unsubscribes the
+  current artist/channel detail.
 - `M-x ytm-radio-start-current-track-mix` starts a YouTube Music mix queue from
   the current track.
 - `M-x ytm-radio-add-current-track-to-playlist` adds the current track to a
@@ -212,8 +219,8 @@ Inside the browser buffer:
 | `n` | Next track |
 | `p` | Previous track |
 | `A` | Open current-track actions |
-| `l` | Like or unlike the current track |
-| `d` | Dislike or undislike the current track |
+| `l` | Like the current track or clear an existing like |
+| `d` | Dislike the current track or clear an existing dislike |
 | `R` | Start mix from the current track |
 | `P` | Add current track to a playlist |
 | `t` | Save or remove current track from library |
@@ -236,8 +243,8 @@ Inside the now-playing child frame:
 | `r` | Cycle repeat mode |
 | `s` | Toggle shuffle |
 | `A` | Open current-track actions |
-| `l` | Like or unlike the current track |
-| `d` | Dislike or undislike the current track |
+| `l` | Like the current track or clear an existing like |
+| `d` | Dislike the current track or clear an existing dislike |
 | `R` | Start mix from the current track |
 | `P` | Add current track to a playlist |
 | `t` | Save or remove current track from library |
@@ -272,6 +279,12 @@ ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --auth FILE
 ytm-radio-helper add-to-playlist VIDEO_ID PLAYLIST_ID --mock
 ytm-radio-helper library VIDEO_ID toggle|save|remove --auth FILE
 ytm-radio-helper library VIDEO_ID toggle|save|remove --mock
+ytm-radio-helper item-library BROWSE_ID toggle|save|remove --auth FILE [--params PARAMS]
+ytm-radio-helper item-library BROWSE_ID toggle|save|remove --mock [--params PARAMS]
+ytm-radio-helper subscription BROWSE_ID toggle|subscribe|unsubscribe --auth FILE [--params PARAMS]
+ytm-radio-helper subscription BROWSE_ID toggle|subscribe|unsubscribe --mock [--params PARAMS]
+ytm-radio-helper track-status VIDEO_ID --auth FILE
+ytm-radio-helper track-status VIDEO_ID --mock
 ```
 
 For `home`, `explore`, and `library`, the helper preserves YouTube Music
@@ -292,7 +305,12 @@ like, dislike, and remove-rating endpoints.
 `playlist-options` returns writable playlists for a video, and
 `add-to-playlist` adds the video to the selected playlist.
 `library` toggles, saves, or removes the current song through YouTube Music
-feedback tokens fetched by the helper.
+feedback tokens fetched by the helper. `item-library` does the same for album
+and playlist detail pages, using a feedback token when one is present and the
+playlist/album rating endpoint otherwise. `subscription` toggles artist/channel
+subscriptions from a detail browse id. `track-status` reads the current account
+like/dislike and library state without mutating the song; the Emacs UI uses it
+to refresh the current track after playback starts.
 
 URL imports remain a general `yt-dlp` compatibility path. They do not store
 YouTube Music menu tokens, but actions that only need a video id, such as
