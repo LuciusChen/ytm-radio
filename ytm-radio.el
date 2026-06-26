@@ -185,8 +185,9 @@ The file contents are never persisted in ytm-radio state."
 
 (defcustom ytm-radio-helper-login-browser nil
   "Browser executable or known browser name used for account login.
-When nil, the helper uses the system default browser when it supports the
-Chromium DevTools login flow."
+When nil, the helper uses the system default browser when it supports a
+known login flow.  Chromium-based browsers use DevTools; Firefox uses
+WebDriver BiDi."
   :type '(choice (const :tag "Auto" nil)
                  string)
   :group 'ytm-radio)
@@ -199,7 +200,7 @@ When nil, the helper opens the login browser with its normal profile."
   :group 'ytm-radio)
 
 (defcustom ytm-radio-helper-login-cdp-port 29317
-  "Local DevTools port used for account login."
+  "Local browser remote-control port used for account login."
   :type '(restricted-sexp
           :match-alternatives
           ((lambda (value)

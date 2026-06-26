@@ -341,14 +341,15 @@ and are cleared after login refresh. If default
 `~/.emacs.d/ytm-radio/auth.json` or `state.eld` files already exist from an
 older checkout, ytm-radio copies them into the new directory on first startup.
 
-By default, ytm-radio opens the system default browser when that browser
-supports the Chromium DevTools login flow. On macOS this uses the default
-application for `https://` URLs. On Linux this uses the default
-`x-scheme-handler/https` desktop entry.
+By default, ytm-radio opens the system default browser when that browser has a
+supported login flow. Chromium-based browsers use the DevTools protocol;
+Firefox uses WebDriver BiDi. On macOS this uses the default application for
+`https://` URLs. On Linux this uses the default `x-scheme-handler/https`
+desktop entry.
 
 Set a preferred login browser when the default browser is unsupported or when
-you want a specific browser. Use `chrome`, `brave`, `edge`, `chromium`, `dia`,
-or an executable path:
+you want a specific browser. Use `chrome`, `brave`, `edge`, `chromium`,
+`firefox`, `dia`, or an executable path:
 
 ```elisp
 (setq ytm-radio-helper-login-browser "chrome")
@@ -362,7 +363,11 @@ login profile instead, set:
       "~/.ytm-radio/login-profile/")
 ```
 
-The default local DevTools port is `29317`:
+Firefox is supported through WebDriver BiDi. If Firefox is already running
+without the helper's remote control port, close it before login or configure an
+isolated profile directory so ytm-radio can start a separate Firefox instance.
+
+The default local browser remote-control port is `29317`:
 
 ```elisp
 (setq ytm-radio-helper-login-cdp-port 29317)

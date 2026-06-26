@@ -5,11 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tungstenite::{connect, Message};
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{connect, Message, WebSocket};
 
 const YTM_ORIGIN: &str = "https://music.youtube.com";
 const YTM_ORIGIN_ENCODED: &str = "https%3A%2F%2Fmusic.youtube.com";
@@ -17,6 +19,34 @@ const DEFAULT_DIA_LOGIN_BROWSER_PATH: &str = "/Applications/Dia.app/Contents/Mac
 const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const YTM_SESSION_EXPRESSION: &str = r#"
+(() => {
+  const get = (name) => {
+    try {
+      if (globalThis.ytcfg && typeof globalThis.ytcfg.get === "function") {
+        const value = globalThis.ytcfg.get(name);
+        if (value !== undefined) return value;
+      }
+      if (globalThis.ytcfg && globalThis.ytcfg.data_) {
+        const value = globalThis.ytcfg.data_[name];
+        if (value !== undefined) return value;
+      }
+    } catch (_) {}
+    return null;
+  };
+  const context = get("INNERTUBE_CONTEXT");
+  const sessionIndex = get("SESSION_INDEX");
+  const delegatedSessionId = get("DELEGATED_SESSION_ID");
+  const dataSyncId = get("DATASYNC_ID");
+  return {
+    innertubeContext: context || null,
+    sessionIndex: sessionIndex == null ? null : String(sessionIndex),
+    delegatedSessionId: delegatedSessionId == null ? null : String(delegatedSessionId),
+    dataSyncId: dataSyncId == null ? null : String(dataSyncId),
+    userAgent: navigator.userAgent || null
+  };
+})()
+"#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -89,6 +119,34 @@ pub fn login_window(
     restart_running: bool,
 ) -> Result<AuthConfig, String> {
     let browser = resolve_login_browser(browser)?;
+    match browser.protocol {
+        LoginProtocol::Cdp => login_window_cdp(
+            output,
+            &browser,
+            profile_dir,
+            port,
+            timeout,
+            restart_running,
+        ),
+        LoginProtocol::Bidi => login_window_bidi(
+            output,
+            &browser,
+            profile_dir,
+            port,
+            timeout,
+            restart_running,
+        ),
+    }
+}
+
+fn login_window_cdp(
+    output: &Path,
+    browser: &LoginBrowser,
+    profile_dir: Option<&Path>,
+    port: u16,
+    timeout: Duration,
+    restart_running: bool,
+) -> Result<AuthConfig, String> {
     let client = Client::builder()
         .timeout(Duration::from_millis(900))
         .build()
@@ -99,16 +157,16 @@ pub fn login_window(
     let version = match cdp_version(&client, &base_url) {
         Ok(version) => version,
         Err(_) => {
-            if login_browser_is_running(&browser) {
+            if login_browser_is_running(browser) {
                 if restart_running {
-                    restart_running_login_browser(&browser)?;
+                    restart_running_login_browser(browser)?;
                 } else if let Some(error) =
-                    running_login_browser_conflict(&browser, port, profile_dir.is_some())
+                    running_login_browser_conflict(browser, port, profile_dir.is_some())
                 {
                     return Err(error);
                 }
             }
-            launched_child = Some(spawn_login_browser(&browser, profile_dir, port)?);
+            launched_child = Some(spawn_login_browser(browser, profile_dir, port)?);
             close_browser_when_done = profile_dir.is_some();
             let Some(version) = wait_for_cdp_version(&client, &base_url, Duration::from_secs(8))
             else {
@@ -132,6 +190,62 @@ pub fn login_window(
     })();
     if close_browser_when_done {
         close_cdp_browser(version.browser_websocket_url.as_deref());
+        terminate_spawned_browser(&mut launched_child);
+    }
+    result
+}
+
+fn login_window_bidi(
+    output: &Path,
+    browser: &LoginBrowser,
+    profile_dir: Option<&Path>,
+    port: u16,
+    timeout: Duration,
+    restart_running: bool,
+) -> Result<AuthConfig, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_millis(900))
+        .build()
+        .map_err(|error| format!("cannot create HTTP client: {error}"))?;
+    let mut launched_child = None;
+    let mut close_browser_when_done = false;
+    let mut connection = match connect_bidi(&client, port) {
+        Ok(connection) => connection,
+        Err(_) => {
+            if login_browser_is_running(browser) {
+                if restart_running {
+                    restart_running_login_browser(browser)?;
+                } else if let Some(error) =
+                    running_login_browser_conflict(browser, port, profile_dir.is_some())
+                {
+                    return Err(error);
+                }
+            }
+            launched_child = Some(spawn_login_browser(browser, profile_dir, port)?);
+            close_browser_when_done = profile_dir.is_some();
+            let Some(connection) = wait_for_bidi_connection(&client, port, Duration::from_secs(8))
+            else {
+                if close_browser_when_done {
+                    terminate_spawned_browser(&mut launched_child);
+                }
+                return Err(format!(
+                    "cannot reach login browser WebDriver BiDi endpoint on 127.0.0.1:{port}; \
+                     if the browser is already running, close it and run login again, \
+                     or set ytm-radio-helper-login-profile-directory for an isolated login profile"
+                ));
+            };
+            connection
+        }
+    };
+    let result = (|| {
+        let context = open_music_bidi_context(&mut connection)?;
+        let config =
+            wait_for_bidi_login_config(&mut connection, &context, browser.name.as_str(), timeout)?;
+        write_private_json(output, &config)?;
+        Ok(config)
+    })();
+    if close_browser_when_done {
+        close_bidi_browser(&mut connection);
         terminate_spawned_browser(&mut launched_child);
     }
     result
@@ -272,16 +386,18 @@ fn running_login_browser_conflict(
     }
     if browser.name == "dia" {
         return Some(format!(
-            "Dia is already running without DevTools on 127.0.0.1:{port}; \
+            "Dia is already running without {} on 127.0.0.1:{port}; \
              close Dia and run login again. Dia only permits one instance, \
-             so ytm-radio will not start a second Dia process."
+             so ytm-radio will not start a second Dia process.",
+            browser.protocol.endpoint_name()
         ));
     }
     Some(format!(
-        "login browser `{}` is already running without DevTools on 127.0.0.1:{port}; \
+        "login browser `{}` is already running without {} on 127.0.0.1:{port}; \
          close it and run login again, or set ytm-radio-helper-login-profile-directory \
          for an isolated login profile.",
-        browser.executable.display()
+        browser.executable.display(),
+        browser.protocol.endpoint_name()
     ))
 }
 
@@ -335,6 +451,30 @@ fn auth_from_cdp_cookies_with_error(
             continue;
         }
         cookie_map.insert(cookie.name.clone(), cookie.value.clone());
+    }
+    auth_from_cookie_map(source_kind, browser, cookie_map, user_agent, missing_error)
+}
+
+fn auth_from_bidi_cookies_with_error(
+    source_kind: &str,
+    browser: Option<&str>,
+    cookies: Vec<BidiCookie>,
+    user_agent: &str,
+    missing_error: &str,
+) -> Result<AuthConfig, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock error: {error}"))?
+        .as_secs_f64();
+    let mut cookie_map = BTreeMap::new();
+    for cookie in cookies {
+        if !is_youtube_domain(&cookie.domain) {
+            continue;
+        }
+        if cookie.expiry.unwrap_or(0.0) > 0.0 && cookie.expiry.unwrap_or(0.0) <= now {
+            continue;
+        }
+        cookie_map.insert(cookie.name, cookie.value.into_cookie_value()?);
     }
     auth_from_cookie_map(source_kind, browser, cookie_map, user_agent, missing_error)
 }
@@ -396,12 +536,46 @@ struct CdpCookie {
     expires: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct BidiCookie {
+    name: String,
+    value: BidiBytesValue,
+    domain: String,
+    #[serde(default)]
+    expiry: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum BidiBytesValue {
+    #[serde(rename = "string")]
+    String { value: String },
+    #[serde(rename = "base64")]
+    Base64 {
+        #[serde(rename = "value")]
+        _value: String,
+    },
+}
+
+impl BidiBytesValue {
+    fn into_cookie_value(self) -> Result<String, String> {
+        match self {
+            Self::String { value } => Ok(value),
+            Self::Base64 { .. } => Err(
+                "Firefox BiDi returned a base64 cookie value; text cookies are required"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq)]
 struct BrowserSession {
     innertube_context: Option<Value>,
     session_index: Option<String>,
     delegated_session_id: Option<String>,
     data_sync_id: Option<String>,
+    user_agent: Option<String>,
 }
 
 impl BrowserSession {
@@ -413,10 +587,34 @@ impl BrowserSession {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginProtocol {
+    Cdp,
+    Bidi,
+}
+
+impl LoginProtocol {
+    fn endpoint_name(self) -> &'static str {
+        match self {
+            Self::Cdp => "DevTools",
+            Self::Bidi => "WebDriver BiDi",
+        }
+    }
+}
+
+type BrowserSocket = WebSocket<MaybeTlsStream<TcpStream>>;
+
+struct BidiConnection {
+    socket: BrowserSocket,
+    next_id: u64,
+    user_agent: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LoginBrowser {
     name: String,
     executable: PathBuf,
+    protocol: LoginProtocol,
 }
 
 fn cdp_base_url(port: u16) -> String {
@@ -455,13 +653,20 @@ fn resolve_login_browser(requested: Option<&str>) -> Result<LoginBrowser, String
         if requested.contains('/') || requested.contains('\\') {
             let executable = PathBuf::from(requested);
             if executable.exists() {
+                let (name, protocol) = supported_login_browser(&executable).unwrap_or_else(|| {
+                    (
+                        executable
+                            .file_stem()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("custom")
+                            .to_string(),
+                        LoginProtocol::Cdp,
+                    )
+                });
                 return Ok(LoginBrowser {
-                    name: executable
-                        .file_stem()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("custom")
-                        .to_string(),
+                    name,
                     executable,
+                    protocol,
                 });
             }
             return Err(format!(
@@ -475,7 +680,7 @@ fn resolve_login_browser(requested: Option<&str>) -> Result<LoginBrowser, String
             return Ok(browser);
         }
         return Err(format!(
-            "cannot find login browser `{requested}`; try chrome, brave, edge, chromium, dia, or an executable path"
+            "cannot find login browser `{requested}`; try chrome, brave, edge, chromium, firefox, dia, or an executable path"
         ));
     }
 
@@ -488,7 +693,7 @@ fn resolve_default_login_browser() -> Result<LoginBrowser, String> {
         return Ok(browser);
     }
     Err(format!(
-        "default login browser `{}` is not available; set ytm-radio-helper-login-browser to chrome, brave, edge, chromium, dia, or an executable path",
+        "default login browser `{}` is not available; set ytm-radio-helper-login-browser to chrome, brave, edge, chromium, firefox, dia, or an executable path",
         browser.executable.display()
     ))
 }
@@ -635,16 +840,16 @@ fn command_stdout(program: &str, arguments: &[&str]) -> Option<String> {
 }
 
 fn supported_default_login_browser(executable: PathBuf) -> Result<LoginBrowser, String> {
-    let Some(name) = supported_login_browser_name(&executable) else {
+    let Some((name, protocol)) = supported_login_browser(&executable) else {
         return Err(format!(
-            "default browser `{}` is not supported for login; set ytm-radio-helper-login-browser to chrome, brave, edge, chromium, dia, or a Chromium-compatible executable path",
+            "default browser `{}` is not supported for login; set ytm-radio-helper-login-browser to chrome, brave, edge, chromium, firefox, dia, or a compatible executable path",
             executable.display()
         ));
     };
-    Ok(login_browser_path(name, executable))
+    Ok(login_browser_path(&name, executable, protocol))
 }
 
-fn supported_login_browser_name(executable: &Path) -> Option<&'static str> {
+fn supported_login_browser(executable: &Path) -> Option<(String, LoginProtocol)> {
     let path = executable.to_string_lossy().to_ascii_lowercase();
     let file = executable
         .file_stem()
@@ -657,16 +862,18 @@ fn supported_login_browser_name(executable: &Path) -> Option<&'static str> {
             "google-chrome" | "google-chrome-stable" | "chrome"
         )
     {
-        Some("chrome")
+        Some(("chrome".to_string(), LoginProtocol::Cdp))
     } else if path.contains("brave browser") || file == "brave-browser" || file == "brave" {
-        Some("brave")
+        Some(("brave".to_string(), LoginProtocol::Cdp))
     } else if path.contains("microsoft edge") || file == "microsoft-edge" {
-        Some("edge")
+        Some(("edge".to_string(), LoginProtocol::Cdp))
     } else if path.contains("chromium") || matches!(file.as_str(), "chromium" | "chromium-browser")
     {
-        Some("chromium")
+        Some(("chromium".to_string(), LoginProtocol::Cdp))
+    } else if path.contains("firefox") || file == "firefox" {
+        Some(("firefox".to_string(), LoginProtocol::Bidi))
     } else if path.contains("/dia.app/") || file == "dia" {
-        Some("dia")
+        Some(("dia".to_string(), LoginProtocol::Cdp))
     } else {
         None
     }
@@ -795,6 +1002,10 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
                 "chromium",
                 "/Applications/Chromium.app/Contents/MacOS/Chromium",
             ),
+            login_browser(
+                "firefox",
+                "/Applications/Firefox.app/Contents/MacOS/firefox",
+            ),
             login_browser("dia", DEFAULT_DIA_LOGIN_BROWSER_PATH),
         ]);
         if let Some(home) = std::env::var_os("HOME") {
@@ -803,18 +1014,27 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
                 login_browser_path(
                     "chrome",
                     home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
                     "brave",
                     home.join("Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
                     "edge",
                     home.join("Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
                     "chromium",
                     home.join("Applications/Chromium.app/Contents/MacOS/Chromium"),
+                    LoginProtocol::Cdp,
+                ),
+                login_browser_path(
+                    "firefox",
+                    home.join("Applications/Firefox.app/Contents/MacOS/firefox"),
+                    LoginProtocol::Bidi,
                 ),
             ]);
         }
@@ -828,19 +1048,34 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
             login_browser("edge", "microsoft-edge"),
             login_browser("chromium", "chromium"),
             login_browser("chromium", "chromium-browser"),
+            login_browser("firefox", "firefox"),
+            login_browser("firefox", "firefox-developer-edition"),
         ]);
     }
     candidates
 }
 
 fn login_browser(name: &str, executable: &str) -> LoginBrowser {
-    login_browser_path(name, PathBuf::from(executable))
+    login_browser_path(
+        name,
+        PathBuf::from(executable),
+        login_browser_protocol(name),
+    )
 }
 
-fn login_browser_path(name: &str, executable: PathBuf) -> LoginBrowser {
+fn login_browser_path(name: &str, executable: PathBuf, protocol: LoginProtocol) -> LoginBrowser {
     LoginBrowser {
         name: name.to_string(),
         executable,
+        protocol,
+    }
+}
+
+fn login_browser_protocol(name: &str) -> LoginProtocol {
+    if name.eq_ignore_ascii_case("firefox") {
+        LoginProtocol::Bidi
+    } else {
+        LoginProtocol::Cdp
     }
 }
 
@@ -862,6 +1097,17 @@ fn spawn_login_browser(
     profile_dir: Option<&Path>,
     port: u16,
 ) -> Result<Child, String> {
+    match browser.protocol {
+        LoginProtocol::Cdp => spawn_cdp_login_browser(browser, profile_dir, port),
+        LoginProtocol::Bidi => spawn_bidi_login_browser(browser, profile_dir, port),
+    }
+}
+
+fn spawn_cdp_login_browser(
+    browser: &LoginBrowser,
+    profile_dir: Option<&Path>,
+    port: u16,
+) -> Result<Child, String> {
     let mut command = Command::new(&browser.executable);
     command
         .arg(format!("--remote-debugging-port={port}"))
@@ -877,6 +1123,36 @@ fn spawn_login_browser(
     }
     command
         .arg("--no-first-run")
+        .arg("--new-window")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "cannot start login browser `{}`: {error}",
+                browser.executable.display()
+            )
+        })
+}
+
+fn spawn_bidi_login_browser(
+    browser: &LoginBrowser,
+    profile_dir: Option<&Path>,
+    port: u16,
+) -> Result<Child, String> {
+    let mut command = Command::new(&browser.executable);
+    command.arg("--remote-debugging-port").arg(port.to_string());
+    if let Some(profile_dir) = profile_dir {
+        fs::create_dir_all(profile_dir).map_err(|error| {
+            format!(
+                "cannot create login browser profile `{}`: {error}",
+                profile_dir.display()
+            )
+        })?;
+        command.arg("--profile").arg(profile_dir).arg("--no-remote");
+    }
+    command
         .arg("--new-window")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -971,39 +1247,12 @@ fn cdp_cookies(websocket_url: &str) -> Result<Vec<CdpCookie>, String> {
 }
 
 fn cdp_session(websocket_url: &str) -> Result<BrowserSession, String> {
-    let expression = r#"
-(() => {
-  const get = (name) => {
-    try {
-      if (globalThis.ytcfg && typeof globalThis.ytcfg.get === "function") {
-        const value = globalThis.ytcfg.get(name);
-        if (value !== undefined) return value;
-      }
-      if (globalThis.ytcfg && globalThis.ytcfg.data_) {
-        const value = globalThis.ytcfg.data_[name];
-        if (value !== undefined) return value;
-      }
-    } catch (_) {}
-    return null;
-  };
-  const context = get("INNERTUBE_CONTEXT");
-  const sessionIndex = get("SESSION_INDEX");
-  const delegatedSessionId = get("DELEGATED_SESSION_ID");
-  const dataSyncId = get("DATASYNC_ID");
-  return {
-    innertubeContext: context || null,
-    sessionIndex: sessionIndex == null ? null : String(sessionIndex),
-    delegatedSessionId: delegatedSessionId == null ? null : String(delegatedSessionId),
-    dataSyncId: dataSyncId == null ? null : String(dataSyncId)
-  };
-})()
-"#;
     let response = cdp_call_with_params(
         websocket_url,
         2,
         "Runtime.evaluate",
         json!({
-            "expression": expression,
+            "expression": YTM_SESSION_EXPRESSION,
             "returnByValue": true,
             "awaitPromise": true
         }),
@@ -1024,6 +1273,7 @@ fn cdp_session(websocket_url: &str) -> Result<BrowserSession, String> {
         session_index: json_string_field(value, "sessionIndex"),
         delegated_session_id: json_string_field(value, "delegatedSessionId"),
         data_sync_id: json_string_field(value, "dataSyncId"),
+        user_agent: json_string_field(value, "userAgent"),
     })
 }
 
@@ -1151,6 +1401,282 @@ fn close_cdp_browser(websocket_url: Option<&str>) {
     }
 }
 
+fn wait_for_bidi_connection(
+    client: &Client,
+    port: u16,
+    timeout: Duration,
+) -> Option<BidiConnection> {
+    let started = SystemTime::now();
+    loop {
+        if let Ok(connection) = connect_bidi(client, port) {
+            return Some(connection);
+        }
+        if started.elapsed().ok()? >= timeout {
+            return None;
+        }
+        sleep(Duration::from_millis(150));
+    }
+}
+
+fn connect_bidi(client: &Client, port: u16) -> Result<BidiConnection, String> {
+    let mut last_error = None;
+    for url in bidi_websocket_urls(client, port) {
+        match BidiConnection::connect(&url).and_then(|mut connection| {
+            connection.start_session()?;
+            Ok(connection)
+        }) {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| format!("cannot find WebDriver BiDi websocket URL on 127.0.0.1:{port}")))
+}
+
+fn bidi_websocket_urls(client: &Client, port: u16) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(url) = browser_websocket_url(client, port) {
+        urls.push(url);
+    }
+    urls.push(format!("ws://127.0.0.1:{port}/session"));
+    urls.push(format!("ws://127.0.0.1:{port}"));
+    dedup_strings(urls)
+}
+
+fn browser_websocket_url(client: &Client, port: u16) -> Option<String> {
+    client
+        .get(format!("{}/json/version", cdp_base_url(port)))
+        .send()
+        .ok()?
+        .json::<CdpVersion>()
+        .ok()?
+        .browser_websocket_url
+}
+
+fn dedup_strings(values: Vec<String>) -> Vec<String> {
+    let mut result = Vec::new();
+    for value in values {
+        if !result.contains(&value) {
+            result.push(value);
+        }
+    }
+    result
+}
+
+impl BidiConnection {
+    fn connect(url: &str) -> Result<Self, String> {
+        let (socket, _) = connect(url).map_err(|error| {
+            format!("cannot connect to WebDriver BiDi websocket `{url}`: {error}")
+        })?;
+        Ok(Self {
+            socket,
+            next_id: 1,
+            user_agent: None,
+        })
+    }
+
+    fn start_session(&mut self) -> Result<(), String> {
+        self.call("session.status", json!({}))?;
+        let result = self.call(
+            "session.new",
+            json!({
+                "capabilities": {
+                    "alwaysMatch": {
+                        "browserName": "firefox"
+                    }
+                }
+            }),
+        )?;
+        self.user_agent = result
+            .pointer("/capabilities/userAgent")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Ok(())
+    }
+
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let payload = json!({
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        self.socket
+            .send(Message::Text(payload.to_string()))
+            .map_err(|error| format!("cannot send WebDriver BiDi request: {error}"))?;
+        loop {
+            let message = self
+                .socket
+                .read()
+                .map_err(|error| format!("cannot read WebDriver BiDi response: {error}"))?;
+            let Ok(text) = message.into_text() else {
+                continue;
+            };
+            let response: Value = serde_json::from_str(&text)
+                .map_err(|error| format!("invalid WebDriver BiDi websocket response: {error}"))?;
+            if response.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            match response.get("type").and_then(Value::as_str) {
+                Some("success") => {
+                    return Ok(response.get("result").cloned().unwrap_or_else(|| json!({})));
+                }
+                Some("error") => {
+                    let error = response
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error");
+                    let message = response
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("no message");
+                    return Err(format!(
+                        "WebDriver BiDi `{method}` failed: {error}: {message}"
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "WebDriver BiDi `{method}` returned an invalid response: {response}"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn open_music_bidi_context(connection: &mut BidiConnection) -> Result<String, String> {
+    let result = connection.call("browsingContext.create", json!({ "type": "tab" }))?;
+    let context = result
+        .get("context")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "WebDriver BiDi did not return a browsing context".to_string())?
+        .to_string();
+    connection.call(
+        "browsingContext.navigate",
+        json!({
+            "context": context,
+            "url": YTM_ORIGIN,
+            "wait": "interactive"
+        }),
+    )?;
+    let _ = connection.call("browsingContext.activate", json!({ "context": context }));
+    Ok(context)
+}
+
+fn wait_for_bidi_login_config(
+    connection: &mut BidiConnection,
+    context: &str,
+    browser_name: &str,
+    timeout: Duration,
+) -> Result<AuthConfig, String> {
+    let started = SystemTime::now();
+    let mut last_error = None;
+    loop {
+        if started.elapsed().unwrap_or_default() >= timeout {
+            return Err(last_error.unwrap_or_else(|| {
+                "login window did not expose an authenticated YouTube Music session before timeout"
+                    .to_string()
+            }));
+        }
+        match bidi_login_config_once(connection, context, browser_name) {
+            Ok(config) => return Ok(config),
+            Err(error) => last_error = Some(error),
+        }
+        sleep(Duration::from_secs(1));
+    }
+}
+
+fn bidi_login_config_once(
+    connection: &mut BidiConnection,
+    context: &str,
+    browser_name: &str,
+) -> Result<AuthConfig, String> {
+    let session = bidi_session(connection, context).ok();
+    let user_agent = session
+        .as_ref()
+        .and_then(|session| session.user_agent.as_deref())
+        .or(connection.user_agent.as_deref())
+        .unwrap_or(DEFAULT_USER_AGENT)
+        .to_string();
+    let cookies = bidi_cookies(connection, context)?;
+    let mut config = auth_from_bidi_cookies_with_error(
+        "login-window",
+        Some(browser_name),
+        cookies,
+        &user_agent,
+        "login window is not authenticated yet; finish signing in to music.youtube.com",
+    )?;
+    if let Some(session) = session.filter(BrowserSession::has_identity) {
+        apply_browser_session(&mut config, session);
+    }
+    Ok(config)
+}
+
+fn bidi_cookies(connection: &mut BidiConnection, context: &str) -> Result<Vec<BidiCookie>, String> {
+    let result = connection
+        .call(
+            "storage.getCookies",
+            json!({
+                "partition": {
+                    "type": "context",
+                    "context": context
+                }
+            }),
+        )
+        .or_else(|_| connection.call("storage.getCookies", json!({})))?;
+    let cookies = result
+        .get("cookies")
+        .cloned()
+        .ok_or_else(|| "WebDriver BiDi cookie response did not include cookies".to_string())?;
+    serde_json::from_value(cookies)
+        .map_err(|error| format!("invalid WebDriver BiDi cookie response: {error}"))
+}
+
+fn bidi_session(connection: &mut BidiConnection, context: &str) -> Result<BrowserSession, String> {
+    let expression = format!("JSON.stringify({YTM_SESSION_EXPRESSION})");
+    let result = connection.call(
+        "script.evaluate",
+        json!({
+            "expression": expression,
+            "target": {
+                "context": context
+            },
+            "awaitPromise": true,
+            "userActivation": false
+        }),
+    )?;
+    if result.get("type").and_then(Value::as_str) == Some("exception") {
+        return Err(format!(
+            "WebDriver BiDi failed to evaluate YouTube Music session context: {result}"
+        ));
+    }
+    let text = result
+        .pointer("/result/value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "WebDriver BiDi session context response did not include a JSON value".to_string()
+        })?;
+    let value: Value = serde_json::from_str(text)
+        .map_err(|error| format!("invalid WebDriver BiDi session context: {error}"))?;
+    Ok(BrowserSession {
+        innertube_context: value
+            .get("innertubeContext")
+            .filter(|context| context.is_object())
+            .cloned(),
+        session_index: json_string_field(&value, "sessionIndex"),
+        delegated_session_id: json_string_field(&value, "delegatedSessionId"),
+        data_sync_id: json_string_field(&value, "dataSyncId"),
+        user_agent: json_string_field(&value, "userAgent"),
+    })
+}
+
+fn close_bidi_browser(connection: &mut BidiConnection) {
+    if connection.call("browser.close", json!({})).is_err() {
+        let _ = connection.call("session.end", json!({}));
+    }
+}
+
 fn terminate_spawned_browser(child: &mut Option<Child>) {
     if let Some(child) = child.as_mut() {
         if matches!(child.try_wait(), Ok(None)) {
@@ -1265,6 +1791,50 @@ mod tests {
     }
 
     #[test]
+    fn builds_login_auth_from_bidi_cookies() {
+        let cookies = vec![
+            BidiCookie {
+                name: "__Secure-3PAPISID".to_string(),
+                value: BidiBytesValue::String {
+                    value: "secret".to_string(),
+                },
+                domain: ".youtube.com".to_string(),
+                expiry: None,
+            },
+            BidiCookie {
+                name: "expired".to_string(),
+                value: BidiBytesValue::String {
+                    value: "old".to_string(),
+                },
+                domain: ".youtube.com".to_string(),
+                expiry: Some(1.0),
+            },
+            BidiCookie {
+                name: "ignored".to_string(),
+                value: BidiBytesValue::String {
+                    value: "value".to_string(),
+                },
+                domain: ".example.com".to_string(),
+                expiry: None,
+            },
+        ];
+        let config = auth_from_bidi_cookies_with_error(
+            "login-window",
+            Some("firefox"),
+            cookies,
+            "Firefox UA",
+            "missing login",
+        )
+        .unwrap();
+        assert_eq!(config.source.kind, "login-window");
+        assert_eq!(config.source.browser, Some("firefox".to_string()));
+        assert_eq!(config.cookie("__Secure-3PAPISID"), Some("secret"));
+        assert_eq!(config.header("user-agent"), Some("Firefox UA"));
+        assert!(!config.header("cookie").unwrap().contains("ignored"));
+        assert!(!config.header("cookie").unwrap().contains("expired"));
+    }
+
+    #[test]
     fn parses_cdp_target_id_for_activation() {
         let target: CdpTarget = serde_json::from_value(json!({
             "id": "target-1",
@@ -1321,6 +1891,7 @@ mod tests {
                 session_index: Some("2".to_string()),
                 delegated_session_id: Some("brand-page-id".to_string()),
                 data_sync_id: None,
+                user_agent: None,
             },
         );
         assert_eq!(config.header("x-goog-authuser"), Some("2"));
@@ -1346,28 +1917,44 @@ mod tests {
 
         assert_eq!(resolved.name, "Test Browser");
         assert_eq!(resolved.executable, browser);
+        assert_eq!(resolved.protocol, LoginProtocol::Cdp);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn resolves_firefox_path_to_bidi_login_browser() {
+        let directory = temporary_test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let browser = directory.join("firefox");
+        fs::write(&browser, "").unwrap();
+
+        let resolved = resolve_login_browser(Some(browser.to_str().unwrap())).unwrap();
+
+        assert_eq!(resolved.name, "firefox");
+        assert_eq!(resolved.executable, browser);
+        assert_eq!(resolved.protocol, LoginProtocol::Bidi);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn recognizes_supported_default_browser_paths() {
         assert_eq!(
-            supported_login_browser_name(Path::new("/Applications/Dia.app/Contents/MacOS/Dia")),
-            Some("dia")
+            supported_login_browser(Path::new("/Applications/Dia.app/Contents/MacOS/Dia")),
+            Some(("dia".to_string(), LoginProtocol::Cdp))
         );
         assert_eq!(
-            supported_login_browser_name(Path::new(
+            supported_login_browser(Path::new(
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
             )),
-            Some("chrome")
+            Some(("chrome".to_string(), LoginProtocol::Cdp))
         );
         assert_eq!(
-            supported_login_browser_name(Path::new("/usr/bin/brave-browser")),
-            Some("brave")
+            supported_login_browser(Path::new("/usr/bin/brave-browser")),
+            Some(("brave".to_string(), LoginProtocol::Cdp))
         );
         assert_eq!(
-            supported_login_browser_name(Path::new("/usr/bin/firefox")),
-            None
+            supported_login_browser(Path::new("/usr/bin/firefox")),
+            Some(("firefox".to_string(), LoginProtocol::Bidi))
         );
     }
 
