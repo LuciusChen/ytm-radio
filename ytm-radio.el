@@ -2,7 +2,7 @@
 
 ;; Author: Lucius Chen
 ;; URL: https://github.com/luciuschen/ytm-radio
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
 ;; Keywords: multimedia
 ;; SPDX-License-Identifier: GPL-3.0-or-later
