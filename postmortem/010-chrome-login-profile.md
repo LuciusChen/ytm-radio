@@ -5,8 +5,12 @@ longer honored for the default Chrome data directory. ytm-radio's previous login
 default used the browser's normal profile, so a closed Chrome could still launch
 without exposing the DevTools endpoint that the helper waits for.
 
-ytm-radio now defaults `ytm-radio-helper-login-profile-directory` to an isolated
-profile under the ytm-radio data directory. This keeps the helper on Chrome's
-supported DevTools path, avoids interfering with the user's daily browser
-profile, and still lets users opt into a normal profile by setting the variable
-to nil for browsers that support it.
+The Rust helper now applies an automatic isolated profile only when the resolved
+login browser is Chrome and no explicit profile directory was provided. The
+automatic Chrome profile lives next to the auth file as `login-profile`. This
+keeps Chrome on its supported DevTools path without forcing Dia, Firefox, or
+other supported browsers into a fresh profile.
+
+`ytm-radio-helper-login-profile-directory` remains an explicit override for
+users who want a specific isolated profile for any supported browser. Leaving it
+nil delegates profile selection to the helper's browser-specific defaults.

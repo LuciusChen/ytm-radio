@@ -69,6 +69,11 @@ Install the account helper from the latest GitHub release:
 M-x ytm-radio-install-helper
 ```
 
+You can also just run `M-x ytm-radio`. When account-backed data is first needed
+and no helper is available, ytm-radio asks whether to download the matching
+helper release. Confirm the prompt to install the helper and continue the
+original action.
+
 Opening `M-x ytm-radio` does not prompt for a URL when the catalog is empty.
 When account access is needed, ytm-radio opens the login flow automatically.
 Use `H`, `E`, `L`, `/`, or `a` to browse account pages, search, or add a URL.
@@ -86,8 +91,8 @@ The child frame is a compact now-playing surface. It fits itself to the current
 cover image, shows title, artist, time, and progress, and exposes the core
 playback controls without turning the child frame into the main browser.
 
-`M-x ytm-radio-install-helper` downloads a platform-specific
-`ytm-radio-helper` binary to:
+`M-x ytm-radio-install-helper`, or the first-use confirmation prompt, downloads
+a platform-specific `ytm-radio-helper` binary to:
 
 ```text
 ~/.ytm-radio/bin/ytm-radio-helper
@@ -110,12 +115,19 @@ helper/target/debug/ytm-radio-helper
 
 ytm-radio uses the configured `ytm-radio-helper-command` when it is executable.
 If the default in-repository helper is missing, it falls back to the installed
-release helper. Set `ytm-radio-helper-command` explicitly when installing the
-binary elsewhere:
+release helper or offers to install it interactively. Set
+`ytm-radio-helper-command` explicitly when installing the binary elsewhere:
 
 ```elisp
 (setq ytm-radio-helper-command
       "/absolute/path/to/ytm-radio-helper")
+```
+
+Disable the first-use install prompt if you want missing helpers to fail with a
+diagnostic instead:
+
+```elisp
+(setq ytm-radio-helper-offer-install nil)
 ```
 
 Run `M-x ytm-radio-doctor` when playback, login import, or account browsing
@@ -306,16 +318,15 @@ If the helper reports that an existing auth file is rejected, for example with
 HTTP 401 Unauthorized or HTTP 403 Forbidden, ytm-radio clears account-derived
 cache, opens the same login flow, and retries the original action after login.
 
-ytm-radio opens the login browser at `https://music.youtube.com` with an
-isolated ytm-radio profile by default. Sign in there if needed. The helper waits
-for the logged-in YouTube Music page to expose cookies and page context, then
-writes the auth JSON.
+ytm-radio opens the login browser at `https://music.youtube.com`. Sign in there
+if needed. The helper waits for the logged-in YouTube Music page to expose
+cookies and page context, then writes the auth JSON.
 
 The login browser must be started with a local DevTools endpoint. If you opt
 into the browser's normal profile and that browser is already running without
-the endpoint, ytm-radio asks before restarting it once. The default isolated
-Chrome profile avoids this conflict and satisfies Chrome's DevTools profile
-requirement.
+the endpoint, ytm-radio asks before restarting it once. Chrome uses a
+helper-managed non-default profile when needed to satisfy Chrome's DevTools
+profile requirement.
 
 The login flow:
 
@@ -356,18 +367,20 @@ you want a specific browser. Use `chrome`, `brave`, `edge`, `chromium`,
 (setq ytm-radio-helper-login-browser "chrome")
 ```
 
-By default, login uses an isolated profile under `~/.ytm-radio/login-profile/`.
-Chrome 136 and newer do not enable DevTools for the default Chrome profile, so
-the isolated profile is required for reliable Chrome login. If you want a
-different isolated login profile, set:
+By default, the helper uses browser-specific profile behavior. Dia and Firefox
+use their normal profile. Chrome uses an isolated profile next to the auth file
+when no explicit profile is configured. With the default auth file, that is
+`~/.ytm-radio/login-profile/`. Chrome 136 and newer do not enable DevTools for
+the default Chrome profile. If you want a specific isolated login profile for
+any supported browser, set:
 
 ```elisp
 (setq ytm-radio-helper-login-profile-directory
-      "~/.ytm-radio/login-profile/")
+      "~/.ytm-radio/custom-login-profile/")
 ```
 
-Set `ytm-radio-helper-login-profile-directory` to nil only if the selected
-browser supports remote control with its normal profile.
+Set `ytm-radio-helper-login-profile-directory` to nil to use the helper's
+browser-specific default behavior.
 
 Firefox is supported through WebDriver BiDi. If Firefox is already running
 without the helper's remote control port, close it before login or configure an

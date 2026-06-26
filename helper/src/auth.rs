@@ -119,11 +119,12 @@ pub fn login_window(
     restart_running: bool,
 ) -> Result<AuthConfig, String> {
     let browser = resolve_login_browser(browser)?;
+    let profile_dir = effective_login_profile_dir(output, &browser, profile_dir);
     match browser.protocol {
         LoginProtocol::Cdp => login_window_cdp(
             output,
             &browser,
-            profile_dir,
+            profile_dir.as_deref(),
             port,
             timeout,
             restart_running,
@@ -131,11 +132,29 @@ pub fn login_window(
         LoginProtocol::Bidi => login_window_bidi(
             output,
             &browser,
-            profile_dir,
+            profile_dir.as_deref(),
             port,
             timeout,
             restart_running,
         ),
+    }
+}
+
+fn effective_login_profile_dir(
+    output: &Path,
+    browser: &LoginBrowser,
+    profile_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    profile_dir
+        .map(Path::to_path_buf)
+        .or_else(|| automatic_login_profile_dir(output, browser))
+}
+
+fn automatic_login_profile_dir(output: &Path, browser: &LoginBrowser) -> Option<PathBuf> {
+    if browser.name == "chrome" {
+        Some(output.with_file_name("login-profile"))
+    } else {
+        None
     }
 }
 
@@ -1903,6 +1922,47 @@ mod tests {
                 .and_then(|context| context.pointer("/user/onBehalfOfUser"))
                 .and_then(Value::as_str),
             Some("brand-page-id")
+        );
+    }
+
+    #[test]
+    fn chrome_uses_automatic_login_profile_by_default() {
+        let browser = login_browser("chrome", "google-chrome");
+        let output = Path::new("/tmp/ytm-radio/auth.json");
+
+        assert_eq!(
+            effective_login_profile_dir(output, &browser, None),
+            Some(PathBuf::from("/tmp/ytm-radio/login-profile"))
+        );
+    }
+
+    #[test]
+    fn non_chrome_browsers_use_normal_profile_by_default() {
+        let output = Path::new("/tmp/ytm-radio/auth.json");
+
+        assert_eq!(
+            effective_login_profile_dir(
+                output,
+                &login_browser("dia", DEFAULT_DIA_LOGIN_BROWSER_PATH),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            effective_login_profile_dir(output, &login_browser("firefox", "firefox"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_login_profile_overrides_automatic_default() {
+        let browser = login_browser("chrome", "google-chrome");
+        let output = Path::new("/tmp/ytm-radio/auth.json");
+        let profile = Path::new("/tmp/custom-login-profile");
+
+        assert_eq!(
+            effective_login_profile_dir(output, &browser, Some(profile)),
+            Some(profile.to_path_buf())
         );
     }
 

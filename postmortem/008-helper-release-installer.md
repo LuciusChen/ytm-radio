@@ -16,13 +16,19 @@ platform-specific helper binary from GitHub Releases into
 still supported for development. When that default path is missing, ytm-radio
 falls back to the installed release helper.
 
+When account-backed data first needs the helper and neither the in-repository
+debug helper nor the installed release helper is executable, ytm-radio offers to
+download the matching helper release. If the user confirms, the same installer
+path downloads the helper and the original helper-backed action continues.
+
 The helper remains an external process, not an Emacs dynamic module. This keeps
 the account boundary unchanged: Emacs still talks to the helper through JSON
 stdout, and the helper can be built, signed, inspected, or replaced
 independently from the Emacs Lisp package.
 
-Downloads happen only through the explicit install command. Opening ytm-radio,
-browsing, or playing does not silently fetch executable code.
+Downloads happen only through the explicit install command or an interactive
+first-use confirmation prompt. Opening ytm-radio, browsing, or playing does not
+silently fetch executable code.
 
 ## Consequences
 

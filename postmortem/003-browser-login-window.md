@@ -1,8 +1,8 @@
 # Browser Login Window
 
-Superseded note: `010-chrome-login-profile.md` changes the default login profile
-back to an isolated ytm-radio profile because Chrome 136 no longer exposes
-remote debugging for the default Chrome data directory.
+Superseded note: `010-chrome-login-profile.md` adds a Chrome-specific automatic
+isolated profile because Chrome 136 no longer exposes remote debugging for the
+default Chrome data directory.
 
 ## Context
 

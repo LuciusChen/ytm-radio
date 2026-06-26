@@ -170,6 +170,11 @@ The browser login window uses the browser or system proxy configuration."
   :type 'directory
   :group 'ytm-radio)
 
+(defcustom ytm-radio-helper-offer-install t
+  "Whether missing default helpers should offer release installation."
+  :type 'boolean
+  :group 'ytm-radio)
+
 (defcustom ytm-radio-helper-release-base-url
   "https://github.com/LuciusChen/ytm-radio/releases/latest/download/"
   "Base URL used by `ytm-radio-install-helper' to download helper releases."
@@ -193,11 +198,11 @@ WebDriver BiDi."
   :group 'ytm-radio)
 
 (defcustom ytm-radio-helper-login-profile-directory
-  (expand-file-name "login-profile/" ytm-radio-data-directory)
-  "Isolated browser profile directory used for account login.
-Chrome 136 and newer require a non-default profile for DevTools login.
-Set this to nil to ask the helper to use the browser's normal profile."
-  :type '(choice (const :tag "Use normal browser profile" nil)
+  nil
+  "Optional isolated browser profile directory used for account login.
+When nil, the helper uses browser-specific defaults.  Chrome may use a
+helper-managed non-default profile when its DevTools login flow requires one."
+  :type '(choice (const :tag "Use helper/browser default profile" nil)
                  directory)
   :group 'ytm-radio)
 
@@ -614,6 +619,12 @@ USING-STREAM-CACHE, and RETRIED-ORIGINAL-URL are ephemeral runtime fields."
       installed)
      (t ytm-radio-helper-command))))
 
+(defun ytm-radio--helper-install-offer-allowed-p ()
+  "Return non-nil when a missing helper can offer release installation."
+  (and ytm-radio-helper-offer-install
+       (not noninteractive)
+       (equal ytm-radio-helper-command ytm-radio--default-helper-command)))
+
 (defun ytm-radio--helper-release-target ()
   "Return the release helper target for the current platform."
   (let ((configuration system-configuration))
@@ -671,6 +682,24 @@ prompting."
           destination)
       (when (file-exists-p temporary)
         (delete-file temporary)))))
+
+(defun ytm-radio--ensure-helper-command ()
+  "Return an executable helper, installing the release after confirmation."
+  (let ((program (ytm-radio--helper-command)))
+    (condition-case error
+        (progn
+          (ytm-radio--ensure-program program "ytm-radio-helper")
+          program)
+      (user-error
+       (let ((diagnostic (error-message-string error)))
+         (if (and (ytm-radio--helper-install-offer-allowed-p)
+                  (y-or-n-p
+                   (format "Download %s for ytm-radio? "
+                           (ytm-radio--helper-release-asset-name))))
+             (ytm-radio-install-helper t)
+           (user-error
+            "%s. Run M-x ytm-radio-install-helper, build the helper with Cargo, or set `ytm-radio-helper-command'"
+            diagnostic)))))))
 
 (defun ytm-radio--doctor-program-path (program)
   "Return the executable path for PROGRAM, or nil."
@@ -1179,22 +1208,17 @@ that does not expose DevTools."
   "Run the external helper with ARGUMENTS asynchronously.
 SUCCESS is called with helper data.  ERROR-CALLBACK is called with a diagnostic
 string."
-  (condition-case error
-      (ytm-radio--call-json-process-async
-       (ytm-radio--helper-command)
-       arguments
-       (lambda (diagnostic)
-         (format "Account helper failed: %s" diagnostic))
-       (lambda (envelope)
-         (condition-case error
-             (funcall success (ytm-radio--helper-envelope-data envelope))
-           (error
-            (funcall error-callback (error-message-string error)))))
-       error-callback)
-    (user-error
-     (user-error
-      "%s. Run M-x ytm-radio-install-helper, build the helper with Cargo, or set `ytm-radio-helper-command'"
-      (error-message-string error)))))
+  (ytm-radio--call-json-process-async
+   (ytm-radio--ensure-helper-command)
+   arguments
+   (lambda (diagnostic)
+     (format "Account helper failed: %s" diagnostic))
+   (lambda (envelope)
+     (condition-case error
+         (funcall success (ytm-radio--helper-envelope-data envelope))
+       (error
+        (funcall error-callback (error-message-string error)))))
+   error-callback))
 
 (defun ytm-radio--helper-envelope-data (envelope)
   "Return the data alist from helper ENVELOPE."

@@ -2390,6 +2390,41 @@
                                 (error-message-string error)))
       (delete-directory directory t))))
 
+(ert-deftest ytm-radio-ensure-helper-command-installs-after-confirmation ()
+  "Install a missing default helper after user confirmation."
+  (let* ((directory (make-temp-file "ytm-radio-helper-offer-install-" t))
+         (ytm-radio-helper-install-directory (expand-file-name "bin" directory))
+         (ytm-radio-helper-release-base-url
+          "https://example.invalid/ytm-radio/releases/latest/download")
+         (ytm-radio--default-helper-command
+          (expand-file-name "missing-repo-helper" directory))
+         (ytm-radio-helper-command ytm-radio--default-helper-command)
+         (ytm-radio-helper-offer-install t)
+         (system-type 'gnu/linux)
+         (system-configuration "x86_64-pc-linux-gnu")
+         (noninteractive nil)
+         copied-url
+         prompt)
+    (unwind-protect
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (question)
+                     (setq prompt question)
+                     t))
+                  ((symbol-function 'ytm-radio--copy-url-to-file)
+                   (lambda (url file)
+                     (setq copied-url url)
+                     (with-temp-file file
+                       (insert "#!/bin/sh\n")))))
+          (let ((installed (ytm-radio--ensure-helper-command)))
+            (should (string-match-p "Download ytm-radio-helper-x86_64-unknown-linux-gnu"
+                                    prompt))
+            (should (equal copied-url
+                           "https://example.invalid/ytm-radio/releases/latest/download/ytm-radio-helper-x86_64-unknown-linux-gnu"))
+            (should (equal installed (ytm-radio--installed-helper-command)))
+            (should (equal ytm-radio-helper-command installed))
+            (should (file-executable-p installed))))
+      (delete-directory directory t))))
+
 (ert-deftest ytm-radio-install-helper-downloads-release-asset ()
   "Download the current platform helper release asset."
   (let* ((directory (make-temp-file "ytm-radio-helper-install-" t))
@@ -3136,9 +3171,9 @@
         "dia")))))
 
 (ert-deftest ytm-radio-helper-login-arguments-auto-browser ()
-  "Use the default browser with the isolated login profile."
+  "Use helper browser defaults without explicit browser or profile overrides."
   (let ((ytm-radio-helper-login-browser nil)
-        (ytm-radio-helper-login-profile-directory "/tmp/ytm-login-profile")
+        (ytm-radio-helper-login-profile-directory nil)
         (ytm-radio-helper-login-cdp-port 29999)
         (ytm-radio-helper-login-timeout 60))
     (should
@@ -3151,15 +3186,11 @@
         "--port"
         "29999"
         "--timeout-secs"
-        "60"
-        "--profile-dir"
-        "/tmp/ytm-login-profile")))))
+        "60")))))
 
-(ert-deftest ytm-radio-helper-login-profile-default-is-isolated ()
-  "Default account login to an isolated browser profile."
-  (should (equal ytm-radio-helper-login-profile-directory
-                 (expand-file-name "login-profile/"
-                                   ytm-radio-data-directory))))
+(ert-deftest ytm-radio-helper-login-profile-default-is-helper-managed ()
+  "Leave default account login profile selection to the helper."
+  (should-not ytm-radio-helper-login-profile-directory))
 
 (ert-deftest ytm-radio-helper-login-arguments-restart-running ()
   "Pass --restart-running only for confirmed browser restart retries."
