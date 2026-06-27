@@ -6507,7 +6507,7 @@ DESCRIPTION is used in the user error."
           (append queue (list (ytm-radio--copy-track-for-queue track))))
     (message "Added %s to queue" (ytm-radio--track-label track))))
 
-;;;###autoload
+;;;###autoload(autoload 'ytm-radio-current-actions "ytm-radio" nil t)
 (transient-define-prefix ytm-radio-current-actions ()
   "Show actions for the current track."
   [["Playback"
