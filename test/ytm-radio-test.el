@@ -2460,6 +2460,176 @@ FIELDS are included on both the top-level mutation output and source."
         (should thumbnail)
         (should (eq (nth 3 thumbnail) 'fixed-canvas))))))
 
+(ert-deftest ytm-radio-thumbnail-download-mutates-cached-image-state ()
+  "Update the cached thumbnail image object without redrawing the browser."
+  (let* ((url "https://example.invalid/thumb.jpg")
+         (file "/tmp/thumb.jpg")
+         (ytm-radio--browser-thumbnail-state-cache
+          (make-hash-table :test #'equal))
+         (ytm-radio--browser-thumbnail-state-keys-by-url
+          (make-hash-table :test #'equal))
+         (ytm-radio--browser-thumbnail-pending-urls nil)
+         (state (ytm-radio--browser-thumbnail-state
+                 url '((image :type svg :data "old") 48 62 fixed-canvas)))
+         (image-object (car state))
+         forced)
+    (with-current-buffer (get-buffer-create ytm-radio--library-buffer-name)
+      (cl-letf (((symbol-function 'file-readable-p)
+                 (lambda (path) (equal path file)))
+                ((symbol-function 'ytm-radio--thumbnail-image-from-file)
+                 (lambda (_file)
+                   '((image :type svg :data "new") 48 62 fixed-canvas)))
+                ((symbol-function 'force-window-update)
+                 (lambda (object) (setq forced object)))
+                ((symbol-function 'ytm-radio--render-browser)
+                 (lambda (&rest _) (error "rendered directly"))))
+        (ytm-radio--thumbnail-download-finished url file)))
+    (should (eq (car state) image-object))
+    (should (equal (cdr image-object) '(:type svg :data "new")))
+    (should (eq forced (get-buffer ytm-radio--library-buffer-name)))))
+
+(ert-deftest ytm-radio-thumbnail-downloads-respect-render-budget ()
+  "Limit thumbnail downloads started during one browser render pass."
+  (let ((ytm-radio--browser-thumbnail-download-budget 1)
+        (ytm-radio--browser-thumbnail-pending-urls nil)
+        (ytm-radio--cover-downloads (make-hash-table :test #'equal))
+        requested)
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) t))
+              ((symbol-function 'ytm-radio--cover-file)
+               (lambda (_url) nil))
+              ((symbol-function 'ytm-radio--ensure-cover-file)
+               (lambda (url _callback)
+                 (push url requested)
+                 nil))
+              ((symbol-function 'ytm-radio--placeholder-thumbnail-image)
+               (lambda (_item) nil)))
+      (ytm-radio--item-thumbnail-image
+       '((title . "Song A")
+         (thumbnail-url . "https://example.invalid/a.jpg")))
+      (ytm-radio--item-thumbnail-image
+       '((title . "Song B")
+         (thumbnail-url . "https://example.invalid/b.jpg")))
+      (should (equal (nreverse requested)
+                     '("https://example.invalid/a.jpg")))
+      (should (equal ytm-radio--browser-thumbnail-pending-urls
+                     '("https://example.invalid/b.jpg"))))))
+
+(ert-deftest ytm-radio-thumbnail-download-registers-in-flight-callback ()
+  "Attach thumbnail updates to cover downloads started by another surface."
+  (let ((ytm-radio--browser-thumbnail-download-budget 1)
+        (ytm-radio--browser-thumbnail-pending-urls nil)
+        (ytm-radio--cover-downloads (make-hash-table :test #'equal))
+        (url "https://example.invalid/a.jpg"))
+    (ytm-radio--register-cover-download-callback url #'ignore)
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) t))
+              ((symbol-function 'ytm-radio--cover-file)
+               (lambda (_url) nil))
+              ((symbol-function 'ytm-radio--placeholder-thumbnail-image)
+               (lambda (_item)
+                 '((image :type svg :data "placeholder") 48 62 fixed-canvas)))
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _) (error "started duplicate download"))))
+      (ytm-radio--item-thumbnail-image
+       `((title . "Song A")
+         (thumbnail-url . ,url))))
+    (should (memq #'ytm-radio--thumbnail-download-finished
+                  (ytm-radio--cover-download-callbacks url)))
+    (should (memq #'ignore (ytm-radio--cover-download-callbacks url)))))
+
+(ert-deftest ytm-radio-pending-thumbnail-downloads-respect-budget ()
+  "Continue pending thumbnail downloads in bounded batches."
+  (let ((ytm-radio-browser-thumbnail-downloads-per-render 1)
+        (ytm-radio--browser-thumbnail-pending-urls
+         '("https://example.invalid/a.jpg"
+           "https://example.invalid/b.jpg"))
+        (ytm-radio--cover-downloads (make-hash-table :test #'equal))
+        requested)
+    (cl-letf (((symbol-function 'ytm-radio--cover-file)
+               (lambda (_url) nil))
+              ((symbol-function 'ytm-radio--ensure-cover-file)
+               (lambda (url _callback)
+                 (push url requested)
+                 nil)))
+      (ytm-radio--start-pending-thumbnail-downloads)
+      (should (equal (nreverse requested)
+                     '("https://example.invalid/a.jpg")))
+      (should (equal ytm-radio--browser-thumbnail-pending-urls
+                     '("https://example.invalid/b.jpg"))))))
+
+(ert-deftest ytm-radio-cover-download-keeps-multiple-callbacks ()
+  "Allow several surfaces to observe one in-flight cover download."
+  (let ((ytm-radio--cover-downloads (make-hash-table :test #'equal))
+        calls)
+    (ytm-radio--register-cover-download-callback
+     "url" (lambda (_url _file) (push 'first calls)))
+    (ytm-radio--register-cover-download-callback
+     "url" (lambda (_url _file) (push 'second calls)))
+    (cl-letf (((symbol-function 'file-readable-p) (lambda (_file) t)))
+      (ytm-radio--run-cover-download-callbacks "url" "/tmp/cover.jpg"))
+    (should (= (length calls) 2))
+    (should (memq 'first calls))
+    (should (memq 'second calls))
+    (should-not (ytm-radio--cover-download-in-flight-p "url"))))
+
+(ert-deftest ytm-radio-cache-cover-coalesces-in-flight-requests ()
+  "Register callbacks for one cover download without duplicate retrievals."
+  (let ((ytm-radio--cover-downloads (make-hash-table :test #'equal))
+        (url "https://example.invalid/cover.jpg")
+        (callback-a (lambda (_url _file) nil))
+        (callback-b (lambda (_url _file) nil))
+        (retrieves 0))
+    (cl-letf (((symbol-function 'ytm-radio--cover-cache-path)
+               (lambda (_url) "/tmp/ytm-radio-cover.jpg"))
+              ((symbol-function 'file-readable-p) (lambda (_file) nil))
+              ((symbol-function 'make-directory) (lambda (&rest _) nil))
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _args)
+                 (cl-incf retrieves)
+                 'process)))
+      (ytm-radio--cache-cover url callback-a)
+      (ytm-radio--cache-cover url callback-b))
+    (should (= retrieves 1))
+    (should (memq callback-a (ytm-radio--cover-download-callbacks url)))
+    (should (memq callback-b (ytm-radio--cover-download-callbacks url)))))
+
+(ert-deftest ytm-radio-image-file-dimensions-uses-cache ()
+  "Avoid measuring the same cached image file on every browser redraw."
+  (let ((ytm-radio--image-dimensions-cache (make-hash-table :test #'equal))
+        (file (make-temp-file "ytm-radio-dimensions-"))
+        (calls 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ytm-radio--image-file-dimensions-uncached)
+                   (lambda (_file)
+                     (cl-incf calls)
+                     '(640 . 480))))
+          (should (equal (ytm-radio--image-file-dimensions file) '(640 . 480)))
+          (should (equal (ytm-radio--image-file-dimensions file) '(640 . 480)))
+          (should (= calls 1)))
+      (delete-file file))))
+
+(ert-deftest ytm-radio-thumbnail-image-from-file-uses-cache ()
+  "Avoid recreating thumbnail image objects on every browser redraw."
+  (let ((ytm-radio--thumbnail-image-cache (make-hash-table :test #'equal))
+        (file (make-temp-file "ytm-radio-thumbnail-"))
+        (calls 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ytm-radio--browser-thumbnail-display-size)
+                   (lambda (_file) '(24 . 18)))
+                  ((symbol-function 'ytm-radio--svg-thumbnail-image)
+                   (lambda (_file) nil))
+                  ((symbol-function 'create-image)
+                   (lambda (&rest _args)
+                     (cl-incf calls)
+                     '(image :type jpeg))))
+          (should (equal (ytm-radio--thumbnail-image-from-file file)
+                         '((image :type jpeg) 24 18)))
+          (should (equal (ytm-radio--thumbnail-image-from-file file)
+                         '((image :type jpeg) 24 18)))
+          (should (= calls 1)))
+      (delete-file file))))
+
 (ert-deftest ytm-radio-render-dashboard-limits-overview-items ()
   "Render overview sections with a compact item limit."
   (let* ((items (cl-loop for index from 1 to 10
