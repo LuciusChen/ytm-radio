@@ -317,6 +317,14 @@ cropped or shifting the following text."
   :type 'boolean
   :group 'ytm-radio)
 
+(defcustom ytm-radio-browser-thumbnail-downloads-per-render 8
+  "Maximum thumbnail downloads started during one browser render.
+When nil, thumbnail downloads are uncapped per render."
+  :type '(choice
+          (const :tag "No per-render cap" nil)
+          natnum)
+  :group 'ytm-radio)
+
 (defcustom ytm-radio-browser-header-height 176
   "Displayed height in pixels for detail header cover images."
   :type '(restricted-sexp
@@ -495,7 +503,26 @@ stored in `ytm-radio-state-file'."
   "Track and width key for the current now-playing title marquee.")
 
 (defvar ytm-radio--cover-downloads (make-hash-table :test #'equal)
-  "Cover image URLs currently being fetched into the local cache.")
+  "Cover image URLs currently being fetched, mapped to completion callbacks.")
+
+(defvar ytm-radio--image-dimensions-cache (make-hash-table :test #'equal)
+  "Cached image dimensions keyed by local file attributes.")
+
+(defvar ytm-radio--thumbnail-image-cache (make-hash-table :test #'equal)
+  "Cached browser thumbnail image objects keyed by file and display size.")
+
+(defvar ytm-radio--browser-thumbnail-state-cache (make-hash-table :test #'equal)
+  "Mutable browser thumbnail descriptors keyed by URL and display settings.")
+
+(defvar ytm-radio--browser-thumbnail-state-keys-by-url
+  (make-hash-table :test #'equal)
+  "Browser thumbnail state cache keys grouped by thumbnail URL.")
+
+(defvar ytm-radio--browser-thumbnail-pending-urls nil
+  "Thumbnail URLs visible in the browser but not yet scheduled for download.")
+
+(defvar ytm-radio--browser-thumbnail-download-budget nil
+  "Dynamic cap for thumbnail downloads started in the current render pass.")
 
 (defvar ytm-radio--stream-url-cache (make-hash-table :test #'equal)
   "Direct audio stream URLs cached by track id or URL.")
@@ -4041,8 +4068,17 @@ When FACE is non-nil, use it as the button face."
     (cons (ytm-radio--buffer-u16-le 7)
           (ytm-radio--buffer-u16-le 9))))
 
-(defun ytm-radio--image-file-dimensions (file)
-  "Return image dimensions in pixels for FILE, or nil."
+(defun ytm-radio--file-cache-key (file &rest variants)
+  "Return a cache key for FILE and VARIANTS using current file attributes."
+  (when-let* (((stringp file))
+              (attributes (file-attributes file)))
+    (append (list (expand-file-name file)
+                  (file-attribute-size attributes)
+                  (file-attribute-modification-time attributes))
+            variants)))
+
+(defun ytm-radio--image-file-dimensions-uncached (file)
+  "Return image dimensions in pixels for FILE, without consulting caches."
   (or (when-let* ((image (ignore-errors (create-image file nil nil))))
         (ignore-errors (image-size image t (selected-frame))))
       (with-temp-buffer
@@ -4051,6 +4087,15 @@ When FACE is non-nil, use it as the button face."
         (or (ytm-radio--jpeg-dimensions)
             (ytm-radio--png-dimensions)
             (ytm-radio--gif-dimensions)))))
+
+(defun ytm-radio--image-file-dimensions (file)
+  "Return image dimensions in pixels for FILE, or nil."
+  (let ((key (ytm-radio--file-cache-key file 'dimensions)))
+    (or (and key (gethash key ytm-radio--image-dimensions-cache))
+        (let ((dimensions (ytm-radio--image-file-dimensions-uncached file)))
+          (when (and key dimensions)
+            (puthash key dimensions ytm-radio--image-dimensions-cache))
+          dimensions))))
 
 (defun ytm-radio--browser-thumbnail-display-size (file)
   "Return thumbnail display size for FILE without cropping."
@@ -4298,34 +4343,135 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
                  :height size
                  :scale 1.0))))
 
+(defun ytm-radio--thumbnail-image-cache-key (file)
+  "Return the browser thumbnail image cache key for FILE."
+  (ytm-radio--file-cache-key
+   file
+   'thumbnail
+   ytm-radio-browser-thumbnail-size
+   ytm-radio-browser-thumbnail-workaround-gaps
+   (frame-char-height (selected-frame))
+   (frame-char-width (selected-frame))))
+
 (defun ytm-radio--thumbnail-image-from-file (file)
   "Return thumbnail image data for FILE."
-  (when-let* ((size (ytm-radio--browser-thumbnail-display-size file))
-              (image (or (ytm-radio--svg-thumbnail-image file)
-                         (ignore-errors
-                           (create-image file nil nil
-                                         :width (car size)
-                                         :height (cdr size)
-                                         :ascent 'center)))))
-    (when (eq (car-safe image) 'image)
-      (if (eq (plist-get (cdr image) :type) 'svg)
-          (list image
-                (ytm-radio--browser-thumbnail-slot-width)
-                (ytm-radio--browser-thumbnail-pixel-size)
-                'fixed-canvas)
-        (list image (car size) (cdr size))))))
+  (let ((key (ytm-radio--thumbnail-image-cache-key file)))
+    (or (and key (gethash key ytm-radio--thumbnail-image-cache))
+        (let ((thumbnail
+               (when-let* ((size (ytm-radio--browser-thumbnail-display-size file))
+                           (image (or (ytm-radio--svg-thumbnail-image file)
+                                      (ignore-errors
+                                        (create-image file nil nil
+                                                      :width (car size)
+                                                      :height (cdr size)
+                                                      :ascent 'center)))))
+                 (when (eq (car-safe image) 'image)
+                   (if (eq (plist-get (cdr image) :type) 'svg)
+                       (list image
+                             (ytm-radio--browser-thumbnail-slot-width)
+                             (ytm-radio--browser-thumbnail-pixel-size)
+                             'fixed-canvas)
+                     (list image (car size) (cdr size)))))))
+          (when (and key thumbnail)
+            (puthash key thumbnail ytm-radio--thumbnail-image-cache))
+          thumbnail))))
+
+(defun ytm-radio--copy-thumbnail-descriptor (thumbnail)
+  "Return a mutable copy of THUMBNAIL descriptor."
+  (when (and thumbnail (eq (car-safe (car thumbnail)) 'image))
+    (let ((copy (copy-sequence thumbnail)))
+      (setcar copy (copy-sequence (car thumbnail)))
+      copy)))
+
+(defun ytm-radio--browser-thumbnail-state-key (url)
+  "Return browser thumbnail state cache key for URL."
+  (when (stringp url)
+    (list url
+          ytm-radio-browser-thumbnail-size
+          ytm-radio-browser-thumbnail-workaround-gaps
+          (frame-char-height (selected-frame))
+          (frame-char-width (selected-frame)))))
+
+(defun ytm-radio--remember-browser-thumbnail-state-key (url key)
+  "Associate thumbnail state KEY with URL."
+  (let ((keys (gethash url ytm-radio--browser-thumbnail-state-keys-by-url)))
+    (unless (member key keys)
+      (puthash url (cons key keys)
+               ytm-radio--browser-thumbnail-state-keys-by-url))))
+
+(defun ytm-radio--thumbnail-layout-compatible-p (state thumbnail)
+  "Return non-nil when STATE can be mutated to THUMBNAIL in place."
+  (and (eq (nth 3 state) (nth 3 thumbnail))
+       (equal (nth 1 state) (nth 1 thumbnail))
+       (equal (nth 2 state) (nth 2 thumbnail))))
+
+(defun ytm-radio--mutate-thumbnail-state (state thumbnail)
+  "Mutate thumbnail STATE so it displays THUMBNAIL's image."
+  (when (and (ytm-radio--thumbnail-layout-compatible-p state thumbnail)
+             (eq (car-safe (car state)) 'image)
+             (eq (car-safe (car thumbnail)) 'image))
+    (ignore-errors (image-flush (car state)))
+    (setcdr (car state) (copy-sequence (cdr (car thumbnail))))
+    (setf (nth 1 state) (nth 1 thumbnail)
+          (nth 2 state) (nth 2 thumbnail)
+          (nth 3 state) (nth 3 thumbnail))
+    t))
+
+(defun ytm-radio--browser-thumbnail-state (url thumbnail &optional update)
+  "Return mutable thumbnail state for URL initialized from THUMBNAIL.
+When UPDATE is non-nil, mutate an existing compatible state to THUMBNAIL."
+  (when-let* ((key (ytm-radio--browser-thumbnail-state-key url)))
+    (let ((state (gethash key ytm-radio--browser-thumbnail-state-cache)))
+      (cond
+       ((and state update)
+        (if (ytm-radio--mutate-thumbnail-state state thumbnail)
+            state
+          (remhash key ytm-radio--browser-thumbnail-state-cache)
+          (ytm-radio--browser-thumbnail-state url thumbnail)))
+       (state state)
+       ((setq state (ytm-radio--copy-thumbnail-descriptor thumbnail))
+        (puthash key state ytm-radio--browser-thumbnail-state-cache)
+        (ytm-radio--remember-browser-thumbnail-state-key url key)
+        state)))))
+
+(defun ytm-radio--remember-pending-browser-thumbnail (url)
+  "Remember URL as a visible thumbnail still waiting to be downloaded."
+  (when (and url (not (member url ytm-radio--browser-thumbnail-pending-urls)))
+    (setq ytm-radio--browser-thumbnail-pending-urls
+          (append ytm-radio--browser-thumbnail-pending-urls (list url)))))
+
+(defun ytm-radio--browser-thumbnail-download-allowed-p (url)
+  "Return non-nil when URL may start a thumbnail download now."
+  (or (null ytm-radio--browser-thumbnail-download-budget)
+      (ytm-radio--cover-download-in-flight-p url)
+      (and (> ytm-radio--browser-thumbnail-download-budget 0)
+           (progn
+             (setq ytm-radio--browser-thumbnail-download-budget
+                   (1- ytm-radio--browser-thumbnail-download-budget))
+             t))))
 
 (defun ytm-radio--item-thumbnail-image (item)
   "Return ITEM's thumbnail image data when available."
   (when (display-graphic-p)
-    (let* ((url (ytm-radio--item-thumbnail-url item))
-           (file (and url
-                      (ytm-radio--ensure-cover-file
-                       url
-                       (lambda (_url _file)
-                         (ytm-radio--render-browser))))))
-      (or (and file (ytm-radio--thumbnail-image-from-file file))
-          (ytm-radio--placeholder-thumbnail-image item)))))
+    (if-let* ((url (ytm-radio--item-thumbnail-url item)))
+        (if-let* ((file (ytm-radio--cover-file url))
+                  (thumbnail (ytm-radio--thumbnail-image-from-file file)))
+            (ytm-radio--browser-thumbnail-state url thumbnail t)
+          (let ((state (ytm-radio--browser-thumbnail-state
+                        url
+                        (ytm-radio--placeholder-thumbnail-image item))))
+            (cond
+             ((ytm-radio--cover-download-in-flight-p url)
+              (ytm-radio--ensure-cover-file
+               url #'ytm-radio--thumbnail-download-finished))
+             ((and (ytm-radio--cover-cache-path url)
+                   (ytm-radio--browser-thumbnail-download-allowed-p url))
+              (ytm-radio--ensure-cover-file
+               url #'ytm-radio--thumbnail-download-finished))
+             (t
+              (ytm-radio--remember-pending-browser-thumbnail url)))
+            state))
+      (ytm-radio--placeholder-thumbnail-image item))))
 
 (defun ytm-radio--thumbnail-slice (thumbnail slice)
   "Return THUMBNAIL display string for top or bottom SLICE."
@@ -4709,10 +4855,7 @@ When COMPACT is non-nil, render only the title row."
          (cover
           (when-let* ((url (and (display-graphic-p)
                                 (ytm-radio--source-thumbnail-url source)))
-                      (file (ytm-radio--ensure-cover-file
-                             url
-                             (lambda (_url _file)
-                               (ytm-radio--render-browser)))))
+                      (file (ytm-radio--ensure-cover-file url nil)))
             (ytm-radio--svg-detail-header-cover-image
              file row-height row-count))))
     (when (and (not cover)
@@ -5039,7 +5182,11 @@ When HISTORY-ENTRY is non-nil, restore its stored browser position."
     (with-current-buffer buffer
       (let ((inhibit-read-only t)
             (sources (ytm-radio--browser-sources))
-            (old-point (point)))
+            (old-point (point))
+            (ytm-radio--browser-thumbnail-download-budget
+             (when (numberp ytm-radio-browser-thumbnail-downloads-per-render)
+               (max 0 ytm-radio-browser-thumbnail-downloads-per-render))))
+        (setq ytm-radio--browser-thumbnail-pending-urls nil)
         (erase-buffer)
         (ytm-radio--insert-browser-heading-padding)
         (when (and (ytm-radio--empty-catalog-p)
@@ -5076,6 +5223,61 @@ When HISTORY-ENTRY is non-nil, restore its stored browser position."
         (ytm-radio--restore-browser-point old-point reset-point history-entry)
         (ytm-radio--maybe-lazy-load-home)))))
 
+(defun ytm-radio--update-browser-thumbnail-states (url file)
+  "Update mutable browser thumbnail states for URL from FILE.
+Return `updated' when cached image specs were mutated, `unsupported'
+when matching states exist but cannot be safely updated in place, and
+nil when no matching states exist."
+  (when-let* ((thumbnail (and (file-readable-p file)
+                              (ytm-radio--thumbnail-image-from-file file)))
+              (keys (gethash url
+                             ytm-radio--browser-thumbnail-state-keys-by-url)))
+    (let (updated unsupported)
+      (dolist (key keys)
+        (when-let* ((state (gethash key
+                                    ytm-radio--browser-thumbnail-state-cache)))
+          (if (ytm-radio--mutate-thumbnail-state state thumbnail)
+              (setq updated t)
+            (setq unsupported t))))
+      (cond
+       (updated
+        (when-let* ((buffer (get-buffer ytm-radio--library-buffer-name)))
+          (force-window-update buffer))
+        'updated)
+       (unsupported 'unsupported)))))
+
+(defun ytm-radio--start-pending-thumbnail-downloads ()
+  "Start a bounded batch of pending browser thumbnail downloads."
+  (let ((ytm-radio--browser-thumbnail-download-budget
+         (when (numberp ytm-radio-browser-thumbnail-downloads-per-render)
+           (max 0 ytm-radio-browser-thumbnail-downloads-per-render)))
+        remaining)
+    (catch 'budget-exhausted
+      (while ytm-radio--browser-thumbnail-pending-urls
+        (let ((url (pop ytm-radio--browser-thumbnail-pending-urls))
+              file)
+          (cond
+           ((setq file (ytm-radio--cover-file url))
+            (ytm-radio--update-browser-thumbnail-states url file))
+           ((ytm-radio--cover-download-in-flight-p url)
+            (ytm-radio--ensure-cover-file
+             url #'ytm-radio--thumbnail-download-finished))
+           ((not (ytm-radio--cover-cache-path url)))
+           ((ytm-radio--browser-thumbnail-download-allowed-p url)
+            (ytm-radio--ensure-cover-file
+             url #'ytm-radio--thumbnail-download-finished))
+           (t
+            (push url remaining)
+            (throw 'budget-exhausted nil))))))
+    (setq ytm-radio--browser-thumbnail-pending-urls
+          (append (nreverse remaining)
+                  ytm-radio--browser-thumbnail-pending-urls))))
+
+(defun ytm-radio--thumbnail-download-finished (url file)
+  "Update browser thumbnail image states after URL was cached in FILE."
+  (ytm-radio--update-browser-thumbnail-states url file)
+  (ytm-radio--start-pending-thumbnail-downloads))
+
 (defun ytm-radio--cover-cache-path (url)
   "Return the local cache path for cover URL, or nil."
   (when (and (stringp url)
@@ -5089,40 +5291,64 @@ When HISTORY-ENTRY is non-nil, restore its stored browser position."
     (when (file-readable-p file)
       file)))
 
+(defun ytm-radio--cover-download-in-flight-p (url)
+  "Return non-nil when cover URL is currently being downloaded."
+  (not (eq (gethash url ytm-radio--cover-downloads :not-found)
+           :not-found)))
+
+(defun ytm-radio--cover-download-callbacks (url)
+  "Return registered completion callbacks for cover URL."
+  (gethash url ytm-radio--cover-downloads))
+
+(defun ytm-radio--register-cover-download-callback (url callback)
+  "Register CALLBACK for the in-flight cover download at URL."
+  (let ((callbacks (ytm-radio--cover-download-callbacks url)))
+    (when callback
+      (cl-pushnew callback callbacks :test #'eq))
+    (puthash url callbacks ytm-radio--cover-downloads)))
+
+(defun ytm-radio--run-cover-download-callbacks (url file)
+  "Run registered cover download callbacks for URL and FILE."
+  (let ((callbacks (ytm-radio--cover-download-callbacks url)))
+    (remhash url ytm-radio--cover-downloads)
+    (when (file-readable-p file)
+      (dolist (callback callbacks)
+        (funcall callback url file)))))
+
 (defun ytm-radio--cache-cover (url callback)
   "Fetch cover URL asynchronously and call CALLBACK with URL and file."
   (when-let* ((file (ytm-radio--cover-cache-path url)))
-    (unless (or (file-readable-p file)
-                (gethash url ytm-radio--cover-downloads))
-      (puthash url t ytm-radio--cover-downloads)
-      (condition-case nil
-          (progn
-            (make-directory ytm-radio-cover-cache-directory t)
-            (let* ((url-show-status nil)
-                   (url-proxy-services
-                    (or (ytm-radio--cover-url-proxy-services)
-                        url-proxy-services))
-                   (process
-                    (url-retrieve
-                     url
-                     (lambda (status)
-                       (unwind-protect
-                           (progn
-                             (remhash url ytm-radio--cover-downloads)
-                             (unless (plist-get status :error)
-                               (goto-char (point-min))
-                               (when (search-forward "\n\n" nil t)
-                                 (let ((coding-system-for-write 'binary))
-                                   (write-region (point) (point-max)
-                                                 file nil 'silent))
-                                 (when (and callback (file-readable-p file))
-                                   (funcall callback url file)))))
-                         (kill-buffer (current-buffer))))
-                     nil t t)))
-              (unless process
-                (remhash url ytm-radio--cover-downloads))))
-        (error
-         (remhash url ytm-radio--cover-downloads))))))
+    (unless (file-readable-p file)
+      (let ((already-downloading (ytm-radio--cover-download-in-flight-p url)))
+        (ytm-radio--register-cover-download-callback url callback)
+        (unless already-downloading
+          (condition-case nil
+            (progn
+              (make-directory ytm-radio-cover-cache-directory t)
+              (let* ((url-show-status nil)
+                     (url-proxy-services
+                      (or (ytm-radio--cover-url-proxy-services)
+                          url-proxy-services))
+                     (process
+                      (url-retrieve
+                       url
+                       (lambda (status)
+                         (unwind-protect
+                             (progn
+                               (unless (plist-get status :error)
+                                 (goto-char (point-min))
+                                 (when (search-forward "\n\n" nil t)
+                                   (let ((coding-system-for-write 'binary))
+                                     (write-region (point) (point-max)
+                                                   file nil 'silent))))
+                               (ytm-radio--run-cover-download-callbacks
+                                url file))
+                           (kill-buffer (current-buffer))))
+                       nil t t)))
+                (unless process
+                  (remhash url ytm-radio--cover-downloads))))
+            (error
+             (remhash url ytm-radio--cover-downloads))))))))
 
 (defun ytm-radio--ensure-cover-file (url callback)
   "Return cached cover file for URL, scheduling CALLBACK if it is missing."
