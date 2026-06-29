@@ -64,6 +64,9 @@ and useful.
 - Root views should use the stable top-level vocabulary: Home, Explore, and
   Library. Search is a command-driven view entered with `/`, not a persistent
   top-level tab.
+- Library should render songs, albums, artists, and playlists without embedding
+  the standalone Liked Music source. The browser does not expose a separate
+  Liked Music import command or navigation entry.
 - The browser buffer should use `header-line-format` for the current view and
   lightweight loading status. The rendered buffer body should start with
   content, not a tab strip.
@@ -138,6 +141,9 @@ and useful.
   directly.
 - Helper schema versions are explicit, and unsupported schema versions must be
   rejected.
+- Helper release installation must select the version matching the Elisp
+  package and verify its published SHA-256 digest before replacing an existing
+  executable.
 - Deterministic tests must not require live YouTube Music, browser cookies, or
   mpv.
 

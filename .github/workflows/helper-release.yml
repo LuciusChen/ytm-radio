@@ -13,8 +13,28 @@ permissions:
   contents: write
 
 jobs:
+  quality:
+    name: helper quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path helper/Cargo.toml -- --check
+
+      - name: Lint helper
+        run: cargo clippy --manifest-path helper/Cargo.toml --locked -- -D warnings
+
+      - name: Test helper
+        run: cargo test --manifest-path helper/Cargo.toml --locked
+
   build:
     name: ${{ matrix.target }}
+    needs: quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -53,6 +73,11 @@ jobs:
           asset="${{ matrix.asset }}"
           cp "helper/target/${{ matrix.target }}/release/${{ matrix.binary }}" "$asset"
           chmod 755 "$asset"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
 
       - name: Upload asset
         shell: bash
@@ -63,4 +88,4 @@ jobs:
           if [ -z "$tag" ]; then
             tag="${{ inputs.tag }}"
           fi
-          gh release upload "$tag" "${{ matrix.asset }}" --clobber
+          gh release upload "$tag" "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber

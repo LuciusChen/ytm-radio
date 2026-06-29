@@ -46,10 +46,16 @@ Visibility rules:
   track rows appear, detail track lists, queue rows, and now-playing should show
   rating markers when `:like-status` is known on that row or another cached row
   for the same video id.
-- Liked Music itself does not show a like marker on every row, because the view
-  already communicates that all tracks are liked.
+- Liked Music uses the same rating markers as other track views. This keeps
+  explicit like and dislike state visible even when the source title already
+  identifies the collection as Liked Music.
 - Library album and playlist bookmark markers remain hidden inside Library
   views to avoid redundant saved-state markers.
+
+The Library root contains songs, albums, artists, and playlists, but not the
+standalone Liked Music source. The browser does not expose a command or key for
+importing that source. The helper may retain its independent `liked` target as
+a protocol capability.
 
 Action labels and messages may use words such as `liked`, `disliked`, `Like`,
 and `Dislike`; this icon contract applies only to persistent row/title rating
@@ -145,7 +151,11 @@ Both successful and failed helper commands write versioned JSON envelopes to
 stdout. Failed commands exit non-zero and include `code`, `message`,
 `retryable`, and `auth-required` fields. Emacs decides whether to start login
 from `auth-required`, not by matching the message text. Human-readable helper
-diagnostics remain on stderr.
+diagnostics remain on stderr. Help is a successful helper command and returns
+its usage text inside the versioned data envelope.
+
+Error code, retryability, and authentication metadata are assigned explicitly
+at the error source. They must not be inferred from human-readable error text.
 
 The Rust helper owns YouTube Music HTTP requests. A read-only YouTubeI request
 that fails before any HTTP response is received is treated as a transient send

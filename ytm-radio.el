@@ -2,7 +2,7 @@
 
 ;; Author: Lucius Chen
 ;; URL: https://github.com/luciuschen/ytm-radio
-;; Version: 0.1.4
+;; Version: 0.1.5
 ;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
 ;; Keywords: multimedia
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -52,7 +52,7 @@
 (defconst ytm-radio--helper-protocol-version 1
   "Supported helper protocol version.")
 
-(defconst ytm-radio--helper-version "0.1.4"
+(defconst ytm-radio--helper-version "0.1.5"
   "Helper binary version expected by this Elisp package.")
 
 ;;; Customization
@@ -208,8 +208,8 @@ proxy to that browser."
   :group 'ytm-radio)
 
 (defcustom ytm-radio-helper-release-base-url
-  "https://github.com/LuciusChen/ytm-radio/releases/latest/download/"
-  "Base URL used by `ytm-radio-install-helper' to download helper releases."
+  "https://github.com/LuciusChen/ytm-radio/releases/download/"
+  "Base URL before the version tag used to download helper releases."
   :type 'string
   :group 'ytm-radio)
 
@@ -928,7 +928,37 @@ Positive source observations take precedence over negative cached snapshots."
   (concat (if (string-suffix-p "/" ytm-radio-helper-release-base-url)
               ytm-radio-helper-release-base-url
             (concat ytm-radio-helper-release-base-url "/"))
+          "v" ytm-radio--helper-version "/"
           (ytm-radio--helper-release-asset-name)))
+
+(defun ytm-radio--helper-release-checksum-url ()
+  "Return the SHA-256 checksum URL for the current helper release."
+  (concat (ytm-radio--helper-release-url) ".sha256"))
+
+(defun ytm-radio--file-sha256 (file)
+  "Return the lowercase SHA-256 digest of FILE."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (secure-hash 'sha256 (current-buffer))))
+
+(defun ytm-radio--read-sha256-file (file)
+  "Return the first SHA-256 digest recorded in FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (unless (looking-at
+             "[[:space:]]*\\([[:xdigit:]]\\{64\\}\\)\\(?:[[:space:]]\\|\\'\\)")
+      (user-error "Invalid helper checksum file"))
+    (downcase (match-string 1))))
+
+(defun ytm-radio--verify-helper-checksum (helper checksum-file)
+  "Verify HELPER against CHECKSUM-FILE or signal a user error."
+  (let ((expected (ytm-radio--read-sha256-file checksum-file))
+        (actual (ytm-radio--file-sha256 helper)))
+    (unless (string-equal expected actual)
+      (user-error "Helper SHA-256 mismatch: expected %s, got %s"
+                  expected actual))))
 
 (defun ytm-radio--copy-url-to-file (url file)
   "Copy URL to FILE, replacing FILE when it exists."
@@ -941,8 +971,10 @@ With prefix argument FORCE, replace an existing installed helper without
 prompting."
   (interactive "P")
   (let* ((url (ytm-radio--helper-release-url))
+         (checksum-url (ytm-radio--helper-release-checksum-url))
          (destination (ytm-radio--installed-helper-command))
-         (temporary (make-temp-file "ytm-radio-helper-download-")))
+         (temporary (make-temp-file "ytm-radio-helper-download-"))
+         (checksum-file (make-temp-file "ytm-radio-helper-checksum-")))
     (when (and (file-exists-p destination)
                (not force)
                (not (y-or-n-p (format "Replace %s? " destination))))
@@ -952,13 +984,17 @@ prompting."
           (make-directory (file-name-directory destination) t)
           (message "Downloading ytm-radio helper from %s..." url)
           (ytm-radio--copy-url-to-file url temporary)
+          (ytm-radio--copy-url-to-file checksum-url checksum-file)
+          (ytm-radio--verify-helper-checksum temporary checksum-file)
           (set-file-modes temporary #o700)
           (rename-file temporary destination t)
           (setq ytm-radio-helper-command destination)
           (message "Installed ytm-radio helper to %s" destination)
           destination)
       (when (file-exists-p temporary)
-        (delete-file temporary)))))
+        (delete-file temporary))
+      (when (file-exists-p checksum-file)
+        (delete-file checksum-file)))))
 
 (defun ytm-radio--ensure-helper-command ()
   "Return an executable helper, installing the release after confirmation."
@@ -1686,10 +1722,11 @@ SOURCE-ID and SOURCE-KIND identify the imported helper source."
            (member kind '("youtube-music-explore"
                           "youtube-music-explore-section"))))
       ("library"
-       (or (string-prefix-p "ytm:library" id)
-           (member kind '("youtube-music-library"
-                          "youtube-music-library-section"
-                          "youtube-music-liked"))))
+       (and (not (or (string-prefix-p "ytm:library:liked" id)
+                     (string-equal kind "youtube-music-liked")))
+            (or (string-prefix-p "ytm:library" id)
+                (member kind '("youtube-music-library"
+                               "youtube-music-library-section")))))
       ("library-songs"
        (string-prefix-p "ytm:library:songs" id))
       ("library-albums"
@@ -2999,7 +3036,6 @@ When AUTOMATIC is non-nil, honor single-track repeat."
     (define-key map (kbd "c") #'ytm-radio-now-playing)
     (define-key map (kbd "E") #'ytm-radio-explore)
     (define-key map (kbd "L") #'ytm-radio-library)
-    (define-key map (kbd "i") #'ytm-radio-import-ytmusic-liked)
     (define-key map (kbd "H") #'ytm-radio-home)
     (define-key map (kbd "RET") #'ytm-radio-open-at-point)
     (define-key map (kbd "m") #'ytm-radio-more)
@@ -3600,10 +3636,6 @@ When RESTORE-ENTRY is non-nil, restore that position after rendering VIEW."
 (defun ytm-radio--library-source-p (source)
   "Return non-nil when SOURCE belongs to the Library view."
   (ytm-radio--source-target-p source 'library))
-
-(defun ytm-radio--liked-source-p (source)
-  "Return non-nil when SOURCE is the Liked Music view."
-  (ytm-radio--source-target-p source 'liked))
 
 (defun ytm-radio--explore-source-p (source)
   "Return non-nil when SOURCE belongs to the Explore view."
@@ -4908,8 +4940,7 @@ When COMPACT is non-nil, render only the title row."
          (two-line-p (or thumbnail metadata (not (string-empty-p detail))))
          (gapless-thumbnail-p (and thumbnail two-line-p))
          (track (ytm-radio--item-track item source))
-         (rating-indicator (unless (ytm-radio--liked-source-p source)
-                             (ytm-radio--track-rating-indicator track)))
+         (rating-indicator (ytm-radio--track-rating-indicator track))
          (item-status-indicator (ytm-radio--item-status-indicator source item))
          (status-indicator (or rating-indicator item-status-indicator))
          (title (ytm-radio--truncate
@@ -5108,18 +5139,6 @@ When COMPACT is non-nil, render only the title row."
               (ytm-radio--browser-sources)
               'list))
 
-(defun ytm-radio--format-total-duration (seconds)
-  "Return SECONDS as a compact total duration label."
-  (when (and (numberp seconds) (> seconds 0))
-    (setq seconds (floor seconds))
-    (cond
-     ((>= seconds 3600)
-      (format "%dh %02dm" (/ seconds 3600) (% (/ seconds 60) 60)))
-     ((>= seconds 60)
-      (format "%dm" (/ seconds 60)))
-     (t
-      (format "%ds" seconds)))))
-
 (defun ytm-radio--format-long-total-duration (seconds)
   "Return SECONDS as a long human duration label."
   (when (and (numberp seconds) (> seconds 0))
@@ -5134,22 +5153,6 @@ When COMPACT is non-nil, render only the title row."
                       (if (= minutes 1) "minute" "minutes"))
               parts))
       (string-join (nreverse parts) ", "))))
-
-(defun ytm-radio--detail-view-summary ()
-  "Return a compact summary for the current detail view."
-  (let* ((tracks (ytm-radio--detail-view-tracks))
-         (items (ytm-radio--detail-view-items))
-         (duration (seq-reduce
-                    (lambda (total track)
-                      (+ total (or (map-elt track :duration) 0)))
-                    tracks
-                    0))
-         (count-label
-          (cond
-           (tracks (ytm-radio--count-label (length tracks) "track" "tracks"))
-           (items (ytm-radio--count-label (length items) "item" "items"))))
-         (duration-label (ytm-radio--format-total-duration duration)))
-    (string-join (delq nil (list count-label duration-label)) " - ")))
 
 (defun ytm-radio--detail-header-summary (source)
   "Return a user-facing detail header summary for SOURCE."
@@ -5613,9 +5616,10 @@ MAX-WIDTH and MAX-HEIGHT bound the returned display size."
     (ytm-radio--scaled-cover-size (ceiling (car dimensions))
                                   (ceiling (cdr dimensions)))))
 
-(defun ytm-radio--cover-refresh-current-track (url _file)
-  "Refresh now-playing when URL belongs to the current track."
-  (when-let* ((current (ytm-radio--current-track)))
+(defun ytm-radio--cover-refresh-current-track (url file)
+  "Refresh now-playing when FILE was cached for the current track's URL."
+  (when-let* ((file)
+              (current (ytm-radio--current-track)))
     (when (equal url (ytm-radio--track-thumbnail-url current))
       (ytm-radio--render-now-playing))))
 
@@ -6405,7 +6409,9 @@ FOCUS is passed through to `ytm-radio--show-child-frame'."
       (when (frame-live-p parent)
         (select-frame-set-input-focus parent))))
   (setq ytm-radio--frame nil
-        ytm-radio--frame-manual-position nil))
+        ytm-radio--frame-manual-position nil)
+  (remove-hook 'window-size-change-functions
+               #'ytm-radio--reposition-on-resize))
 
 (defun ytm-radio--buffer-image (buffer)
   "Return the first image displayed in BUFFER, or nil."
@@ -6596,6 +6602,7 @@ FOCUS is passed through to `ytm-radio--show-child-frame'."
                      (visibility . nil)))))
       (redirect-frame-focus frame parent)
       (setq ytm-radio--frame frame)))
+  (add-hook 'window-size-change-functions #'ytm-radio--reposition-on-resize)
   (ytm-radio--apply-child-frame-border-face ytm-radio--frame)
   (let ((window (frame-root-window ytm-radio--frame)))
     (when-let* ((parent (frame-parent ytm-radio--frame)))
@@ -6628,11 +6635,11 @@ FOCUS is passed through to `ytm-radio--show-child-frame'."
 
 (defun ytm-radio--reposition-on-resize (frame)
   "Re-pin the now-playing child frame when parent FRAME changes size."
-  (when (and (frame-live-p ytm-radio--frame)
-             (eq frame (frame-parent ytm-radio--frame)))
-    (ytm-radio--position-frame ytm-radio--frame)))
-
-(add-hook 'window-size-change-functions #'ytm-radio--reposition-on-resize)
+  (if (frame-live-p ytm-radio--frame)
+      (when (eq frame (frame-parent ytm-radio--frame))
+        (ytm-radio--position-frame ytm-radio--frame))
+    (remove-hook 'window-size-change-functions
+                 #'ytm-radio--reposition-on-resize)))
 
 (defun ytm-radio--show-buffer (buffer)
   "Show browser BUFFER in a regular Emacs window."
@@ -6900,10 +6907,12 @@ When AFTER-SUCCESS is non-nil, call it after importing auth."
 
 ;;;###autoload
 (defun ytm-radio-now-playing ()
-  "Show the configured now-playing view."
+  "Show or hide the configured now-playing view."
   (interactive)
   (ytm-radio--ensure-loaded)
-  (ytm-radio--show-now-playing t))
+  (if (ytm-radio--now-playing-visible-p)
+      (ytm-radio-hide-now-playing)
+    (ytm-radio--show-now-playing t)))
 
 ;;;###autoload
 (defun ytm-radio-queue ()
@@ -6969,13 +6978,6 @@ When AFTER-SUCCESS is non-nil, call it after importing auth."
   (interactive)
   (ytm-radio--set-browser-view 'explore t)
   (ytm-radio--start-helper-target-load "explore" "explore" 'explore))
-
-;;;###autoload
-(defun ytm-radio-import-ytmusic-liked ()
-  "Import YouTube Music liked songs through the Rust helper."
-  (interactive)
-  (ytm-radio--set-browser-view 'library t)
-  (ytm-radio--start-helper-target-load "liked" "liked songs" 'library))
 
 ;;;###autoload
 (defun ytm-radio-play-track ()

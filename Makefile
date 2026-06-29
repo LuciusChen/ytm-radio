@@ -22,12 +22,12 @@ package-lint:
 
 helper-check:
 	$(CARGO) fmt --manifest-path helper/Cargo.toml -- --check
-	$(CARGO) clippy --manifest-path helper/Cargo.toml -- -D warnings
+	$(CARGO) clippy --manifest-path helper/Cargo.toml --locked -- -D warnings
 	$(MAKE) helper-test
-	$(CARGO) build --manifest-path helper/Cargo.toml
+	$(CARGO) build --manifest-path helper/Cargo.toml --locked
 
 helper-test:
-	$(CARGO) test --manifest-path helper/Cargo.toml
+	$(CARGO) test --manifest-path helper/Cargo.toml --locked
 
 clean:
 	rm -f *.elc test/*.elc

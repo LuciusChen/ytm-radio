@@ -17,6 +17,8 @@ process for a request, reads a versioned JSON response, and the process exits.
 
 ![ytm-radio Home view with the now-playing child frame](assets/ytm-radio-home-now-playing.jpg)
 
+![ytm-radio Liked Music detail with the side-window now-playing view](assets/ytm-radio-liked-music-side-window.jpg)
+
 ## Status
 
 Implemented:
@@ -95,11 +97,13 @@ Use `H`, `E`, `L`, `/`, or `a` to browse account pages, search, or add a URL.
 
 The main `*ytm-radio*` buffer is the YouTube Music browser. It renders Home,
 Explore, Library, Search, and URL-backed pages as vertical Emacs sections with
-compact track/card rows. Home, Explore, and Library sections preserve YouTube
-Music modules such as listen-again, mixed-for-you, albums, playlists, artists,
-and liked music when the web response includes them. UI rows truncate instead
-of visually wrapping in narrow windows, so long titles do not disturb the list
-layout. Click Home, Explore, or Library in the header line to switch root views;
+compact track/card rows. Home and Explore preserve YouTube Music modules such
+as listen-again, mixed-for-you, albums, playlists, and artists when the web
+response includes them. Library renders its songs, albums, artists, and
+playlists sections. Liked Music is not exposed as a browser entry or shown as a
+Library root section. UI rows truncate instead of visually wrapping
+in narrow windows, so long titles do not disturb the list layout. Click Home,
+Explore, or Library in the header line to switch root views;
 the `H`, `E`, and `L` keys provide the same navigation.
 Home, Explore, and Library use cached sections first and only load asynchronously
 when a view has no cached data or when explicitly refreshed. Home continuation
@@ -137,7 +141,8 @@ instead of wrapping.
 ```
 
 `M-x ytm-radio-install-helper`, or the first-use confirmation prompt, downloads
-a platform-specific `ytm-radio-helper` binary to:
+the helper release matching the Elisp package version, verifies its published
+SHA-256 digest, and installs the platform-specific binary to:
 
 ```text
 ~/.ytm-radio/bin/ytm-radio-helper
@@ -195,10 +200,9 @@ directory, and the auth file are visible from Emacs.
 - `M-x ytm-radio-more` opens hidden items in the current section.
 - `M-x ytm-radio-load-more-home` imports the next Home continuation page.
 - `M-x ytm-radio-import-ytmusic-explore` imports explore sections.
-- `M-x ytm-radio-import-ytmusic-liked` imports liked songs.
 - `M-x ytm-radio-refresh` refreshes the current browser view.
 - `M-x ytm-radio-search` searches YouTube Music.
-- `M-x ytm-radio-now-playing` shows the configured now-playing view.
+- `M-x ytm-radio-now-playing` shows or hides the configured now-playing view.
 - `M-x ytm-radio-queue` shows the current runtime playback queue.
 - `M-x ytm-radio-play-track` selects a known track.
 - `M-x ytm-radio-play-source` selects a known source.
@@ -241,11 +245,10 @@ Inside the browser buffer:
 | Key | Action |
 | --- | --- |
 | `a` | Add URL |
-| `c` | Show the now-playing view |
+| `c` | Show or hide the now-playing view |
 | `H` | Switch to Home |
 | `E` | Switch to Explore |
 | `L` | Switch to Library |
-| `i` | Import liked songs |
 | `/` | Search YouTube Music |
 | `RET` | Play a track or open the item/source at point |
 | `j`, `k`, `Down`, `Up` | Move between item rows |
@@ -358,7 +361,7 @@ Responses use a stable envelope:
   "ok": true,
   "schema": 1,
   "protocol": 1,
-  "helper-version": "0.1.4",
+  "helper-version": "0.1.5",
   "data": {
     "sources": []
   },
@@ -368,7 +371,9 @@ Responses use a stable envelope:
 
 Failed helper commands also write a versioned JSON envelope to stdout and exit
 non-zero. Its `error` object includes a stable `code`, human-readable `message`,
-and `retryable` and `auth-required` flags. Diagnostics remain on stderr.
+and `retryable` and `auth-required` flags. Error metadata is assigned where the
+failure occurs rather than inferred from message text. Help output is returned
+inside the same successful JSON envelope. Diagnostics remain on stderr.
 
 ## Login
 

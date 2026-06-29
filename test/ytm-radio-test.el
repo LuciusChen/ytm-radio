@@ -24,6 +24,24 @@
       ytm-radio-cover-cache-directory
       (expand-file-name "covers/" ytm-radio-test--data-directory))
 
+(defun ytm-radio-test--cleanup-data-directory ()
+  "Remove the shared test runtime directory."
+  (when (file-directory-p ytm-radio-test--data-directory)
+    (delete-directory ytm-radio-test--data-directory t)))
+
+(add-hook 'kill-emacs-hook #'ytm-radio-test--cleanup-data-directory)
+
+(defconst ytm-radio-test--helper-download-content "#!/bin/sh\n"
+  "Binary fixture content used by helper installer tests.")
+
+(defun ytm-radio-test--copy-helper-release-file (url file)
+  "Write the helper release fixture requested by URL to FILE."
+  (with-temp-file file
+    (if (string-suffix-p ".sha256" url)
+        (insert (secure-hash 'sha256 ytm-radio-test--helper-download-content)
+                "  ytm-radio-helper\n")
+      (insert ytm-radio-test--helper-download-content))))
+
 (defun ytm-radio-test--detail-helper-source
     (browse-id kind title &rest fields)
   "Return a raw helper detail source for BROWSE-ID, KIND, and TITLE.
@@ -1144,8 +1162,8 @@ FIELDS are included on both the top-level mutation output and source."
       (should (string-match-p (regexp-quote "Let Her Go ▲")
                               (buffer-string))))))
 
-(ert-deftest ytm-radio-render-liked-music-hides-rating-indicators ()
-  "Render Liked Music without redundant liked markers."
+(ert-deftest ytm-radio-render-liked-music-shows-rating-indicators ()
+  "Render Liked Music tracks with the same rating markers as other views."
   (let* ((source (ytm-radio--make-source
                   :id "ytm:library:liked"
                   :kind 'youtube-music-liked
@@ -1157,7 +1175,9 @@ FIELDS are included on both the top-level mutation output and source."
                             (title . "Liked Track")
                             (like-status . "like")
                             (url . "https://music.youtube.com/watch?v=v1")))))
-         (ytm-radio--browser-view 'library)
+         (ytm-radio--browser-view '((:kind . section)
+                                    (:source-id . "ytm:library:liked")
+                                    (:title . "Liked Music")))
          (ytm-radio--state
           (ytm-radio--make-state
            :sources (list (cons (map-elt source :id) source))))
@@ -1171,8 +1191,34 @@ FIELDS are included on both the top-level mutation output and source."
     (with-current-buffer "*ytm-radio*"
       (should (string-match-p "01[[:space:]]+Liked Track"
                               (buffer-string)))
-      (should-not (string-match-p (regexp-quote "Liked Track ▲")
-                                  (buffer-string))))))
+      (should (string-match-p (regexp-quote "Liked Track ▲")
+                              (buffer-string))))))
+
+(ert-deftest ytm-radio-library-root-excludes-liked-music-source ()
+  "Do not show the standalone Liked Music source in the Library root."
+  (let* ((songs (ytm-radio--make-source
+                 :id "ytm:library:songs"
+                 :kind 'youtube-music-library-section
+                 :title "Songs"
+                 :items nil))
+         (liked (ytm-radio--make-source
+                 :id "ytm:library:liked"
+                 :kind 'youtube-music-liked
+                 :title "Liked Music"
+                 :items nil))
+         (sources (list (cons (map-elt songs :id) songs)
+                        (cons (map-elt liked :id) liked)))
+         (ytm-radio--browser-view 'library)
+         (ytm-radio--state
+          (ytm-radio--make-state :sources sources)))
+    (should (equal (mapcar (lambda (source)
+                             (map-elt source :id))
+                           (ytm-radio--browser-sources))
+                   '("ytm:library:songs")))
+    (should (equal (mapcar (lambda (source)
+                             (map-elt source :id))
+                           (ytm-radio--target-sources "liked"))
+                   '("ytm:library:liked")))))
 
 (ert-deftest ytm-radio-render-library-items-hide-library-status-marker ()
   "Render Library albums/playlists without redundant bookmark markers."
@@ -1532,21 +1578,6 @@ FIELDS are included on both the top-level mutation output and source."
       (should-not (ytm-radio--source "ytm:search:late:songs"))
       (should-not saved)
       (should (eq ytm-radio--browser-load-process 'old-process)))))
-
-(ert-deftest ytm-radio-liked-import-uses-async-target-loader ()
-  "Import liked songs through the shared async target loader."
-  (let ((ytm-radio--state (ytm-radio--make-state))
-        (ytm-radio--player (ytm-radio--make-player))
-        (ytm-radio--loaded t)
-        captured)
-    (with-current-buffer (ytm-radio--buffer)
-      (let ((inhibit-read-only t))
-        (erase-buffer)))
-    (cl-letf (((symbol-function 'ytm-radio--start-helper-target-load)
-               (lambda (target label view)
-                 (setq captured (list target label view)))))
-      (ytm-radio-import-ytmusic-liked)
-      (should (equal captured '("liked" "liked songs" library))))))
 
 (ert-deftest ytm-radio-refresh-liked-section-bypasses-helper-cache ()
   "Refreshing a liked songs section requests fresh helper data."
@@ -2352,43 +2383,6 @@ FIELDS are included on both the top-level mutation output and source."
       (should (string-match-p "Chill girl Vibes" (buffer-string)))
       (should (string-match-p "448K monthly audience" (buffer-string))))))
 
-(ert-deftest ytm-radio-detail-header-summary-uses-detail-tracks ()
-  "Summarize tracks from the full detail view, not the header source."
-  (let* ((track-a (ytm-radio--make-track
-                   :id "a"
-                   :title "A"
-                   :url "https://music.youtube.com/watch?v=a"
-                   :duration 60))
-         (track-b (ytm-radio--make-track
-                   :id "b"
-                   :title "B"
-                   :url "https://music.youtube.com/watch?v=b"
-                   :duration 125))
-         (header (ytm-radio--make-source
-                  :id "ytm:browse:MPRE1:header"
-                  :kind 'youtube-music-album
-                  :title "Album"
-                  :items nil
-                  :tracks nil
-                  :subtitle "Album - Artist"))
-         (songs (ytm-radio--make-source
-                 :id "ytm:browse:MPRE1:1:songs"
-                 :kind 'youtube-music-detail-section
-                 :title "Songs"
-                 :items (list track-a track-b)
-                 :tracks (list track-a track-b)))
-         (ytm-radio--browser-view
-          (list (cons :kind 'detail)
-                (cons :source-ids (list (map-elt header :id)
-                                        (map-elt songs :id)))))
-         (ytm-radio--state
-          (ytm-radio--make-state
-           :sources (list (cons (map-elt header :id) header)
-                          (cons (map-elt songs :id) songs))))
-         (ytm-radio--player (ytm-radio--make-player)))
-    (should (equal (ytm-radio--detail-view-summary)
-                   "2 tracks - 3m"))))
-
 (ert-deftest ytm-radio-detail-view-hides-empty-header-and-generic-section-title ()
   "Do not render empty detail headers or internal fallback section titles."
   (let* ((track (ytm-radio--make-track
@@ -2645,6 +2639,21 @@ FIELDS are included on both the top-level mutation output and source."
     (should (eq completed-file 'failed))
     (should-not (ytm-radio--cover-download-in-flight-p "url"))))
 
+(ert-deftest ytm-radio-cover-download-failure-does-not-rerender-player ()
+  "Do not immediately retry a failed current-track cover download."
+  (let* ((track (ytm-radio--make-track
+                 :id "v1"
+                 :title "Song"
+                 :thumbnail-url "https://example.invalid/cover.jpg"))
+         (ytm-radio--player
+          (ytm-radio--make-player :current-track track))
+         rendered)
+    (cl-letf (((symbol-function 'ytm-radio--render-now-playing)
+               (lambda () (setq rendered t))))
+      (ytm-radio--cover-refresh-current-track
+       "https://example.invalid/cover.jpg" nil))
+    (should-not rendered)))
+
 (ert-deftest ytm-radio-cache-cover-coalesces-in-flight-requests ()
   "Register callbacks for one cover download without duplicate retrievals."
   (let ((ytm-radio--cover-downloads (make-hash-table :test #'equal))
@@ -2778,6 +2787,8 @@ FIELDS are included on both the top-level mutation output and source."
                   #'ytm-radio-home))
   (should-not (eq (lookup-key ytm-radio--mode-map (kbd "e"))
                   #'ytm-radio-explore))
+  (should-not (lookup-key ytm-radio--mode-map (kbd "i")))
+  (should-not (fboundp 'ytm-radio-import-ytmusic-liked))
   (should-not (lookup-key ytm-radio--mode-map (kbd "o")))
   (should (eq (lookup-key ytm-radio--mode-map (kbd "l"))
               #'ytm-radio-like-current-track)))
@@ -4733,7 +4744,7 @@ STRING-PIXEL-WIDTH replaces `string-pixel-width' during rendering."
   (let* ((directory (make-temp-file "ytm-radio-helper-offer-install-" t))
          (ytm-radio-helper-install-directory (expand-file-name "bin" directory))
          (ytm-radio-helper-release-base-url
-          "https://example.invalid/ytm-radio/releases/latest/download")
+          "https://example.invalid/ytm-radio/releases/download")
          (ytm-radio--default-helper-command
           (expand-file-name "missing-repo-helper" directory))
          (ytm-radio-helper-command ytm-radio--default-helper-command)
@@ -4741,7 +4752,7 @@ STRING-PIXEL-WIDTH replaces `string-pixel-width' during rendering."
          (system-type 'gnu/linux)
          (system-configuration "x86_64-pc-linux-gnu")
          (noninteractive nil)
-         copied-url
+         copied-urls
          prompt)
     (unwind-protect
         (cl-letf (((symbol-function 'y-or-n-p)
@@ -4750,14 +4761,18 @@ STRING-PIXEL-WIDTH replaces `string-pixel-width' during rendering."
                      t))
                   ((symbol-function 'ytm-radio--copy-url-to-file)
                    (lambda (url file)
-                     (setq copied-url url)
-                     (with-temp-file file
-                       (insert "#!/bin/sh\n")))))
+                     (push url copied-urls)
+                     (ytm-radio-test--copy-helper-release-file url file))))
           (let ((installed (ytm-radio--ensure-helper-command)))
             (should (string-match-p "Download ytm-radio-helper-x86_64-unknown-linux-gnu"
                                     prompt))
-            (should (equal copied-url
-                           "https://example.invalid/ytm-radio/releases/latest/download/ytm-radio-helper-x86_64-unknown-linux-gnu"))
+            (should (equal
+                     (nreverse copied-urls)
+                     (list
+                      (format "https://example.invalid/ytm-radio/releases/download/v%s/ytm-radio-helper-x86_64-unknown-linux-gnu"
+                              ytm-radio--helper-version)
+                      (format "https://example.invalid/ytm-radio/releases/download/v%s/ytm-radio-helper-x86_64-unknown-linux-gnu.sha256"
+                              ytm-radio--helper-version))))
             (should (equal installed (ytm-radio--installed-helper-command)))
             (should (equal ytm-radio-helper-command installed))
             (should (file-executable-p installed))))
@@ -4768,22 +4783,45 @@ STRING-PIXEL-WIDTH replaces `string-pixel-width' during rendering."
   (let* ((directory (make-temp-file "ytm-radio-helper-install-" t))
          (ytm-radio-helper-install-directory (expand-file-name "bin" directory))
          (ytm-radio-helper-release-base-url
-          "https://example.invalid/ytm-radio/releases/latest/download")
+          "https://example.invalid/ytm-radio/releases/download")
          (system-type 'darwin)
          (system-configuration "aarch64-apple-darwin")
-         copied-url)
+         copied-urls)
     (unwind-protect
         (cl-letf (((symbol-function 'ytm-radio--copy-url-to-file)
-                   (lambda (url file)
-                     (setq copied-url url)
-                     (with-temp-file file
-                       (insert "#!/bin/sh\n")))))
+                  (lambda (url file)
+                     (push url copied-urls)
+                     (ytm-radio-test--copy-helper-release-file url file))))
           (let ((installed (ytm-radio-install-helper t)))
-            (should (equal copied-url
-                           "https://example.invalid/ytm-radio/releases/latest/download/ytm-radio-helper-aarch64-apple-darwin"))
+            (should (equal
+                     (nreverse copied-urls)
+                     (list
+                      (format "https://example.invalid/ytm-radio/releases/download/v%s/ytm-radio-helper-aarch64-apple-darwin"
+                              ytm-radio--helper-version)
+                      (format "https://example.invalid/ytm-radio/releases/download/v%s/ytm-radio-helper-aarch64-apple-darwin.sha256"
+                              ytm-radio--helper-version))))
             (should (equal installed (ytm-radio--installed-helper-command)))
             (should (equal ytm-radio-helper-command installed))
             (should (file-executable-p installed))))
+      (delete-directory directory t))))
+
+(ert-deftest ytm-radio-install-helper-rejects-checksum-mismatch ()
+  "Do not install a helper whose release checksum does not match."
+  (let* ((directory (make-temp-file "ytm-radio-helper-checksum-" t))
+         (ytm-radio-helper-install-directory (expand-file-name "bin" directory))
+         (ytm-radio-helper-release-base-url "https://example.invalid/releases/download")
+         (system-type 'darwin)
+         (system-configuration "aarch64-apple-darwin")
+         (destination (ytm-radio--installed-helper-command)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ytm-radio--copy-url-to-file)
+                   (lambda (url file)
+                     (with-temp-file file
+                       (if (string-suffix-p ".sha256" url)
+                           (insert (make-string 64 ?0))
+                         (insert ytm-radio-test--helper-download-content))))))
+          (should-error (ytm-radio-install-helper t) :type 'user-error)
+          (should-not (file-exists-p destination)))
       (delete-directory directory t))))
 
 (ert-deftest ytm-radio-progress-bar-renders-unicode ()
