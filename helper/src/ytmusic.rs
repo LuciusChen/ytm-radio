@@ -28,6 +28,37 @@ const MUTATION_DETAIL_LIMIT: usize = 100;
 const TIMINGS_ENV: &str = "YTM_RADIO_TIMINGS";
 const YOUTUBEI_SEND_RETRY_DELAYS_MS: [u64; 2] = [250, 750];
 
+#[derive(Clone, Copy)]
+enum SendPolicy {
+    Read,
+    Mutation,
+}
+
+#[derive(Clone, Copy)]
+struct RequestPolicy<'a> {
+    send: SendPolicy,
+    cache_dir: Option<&'a Path>,
+    cache_ttl_secs: u64,
+}
+
+impl<'a> RequestPolicy<'a> {
+    fn read(cache_dir: Option<&'a Path>, cache_ttl_secs: u64) -> Self {
+        Self {
+            send: SendPolicy::Read,
+            cache_dir,
+            cache_ttl_secs,
+        }
+    }
+
+    fn mutation() -> Self {
+        Self {
+            send: SendPolicy::Mutation,
+            cache_dir: None,
+            cache_ttl_secs: 0,
+        }
+    }
+}
+
 fn youtube_client(proxy: Option<&str>) -> Result<Client, String> {
     let proxy = proxy.map(str::trim).filter(|value| !value.is_empty());
     let mut builder = Client::builder().timeout(Duration::from_secs(30));
@@ -178,7 +209,14 @@ pub fn rate(
         "context": youtubei_context(auth, &bootstrap),
         "target": { "videoId": video_id }
     });
-    request_youtubei_path(&client, auth, &bootstrap, endpoint, &body, None, 0)?;
+    request_youtubei_path(
+        &client,
+        auth,
+        &bootstrap,
+        endpoint,
+        &body,
+        RequestPolicy::mutation(),
+    )?;
     Ok(json!({
         "video-id": video_id,
         "rating": rating
@@ -234,8 +272,7 @@ pub fn add_to_playlist(
         &bootstrap,
         "browse/edit_playlist",
         &body,
-        None,
-        0,
+        RequestPolicy::mutation(),
     )?;
     Ok(json!({
         "video-id": video_id,
@@ -402,7 +439,14 @@ fn apply_feedback_token(
         "context": youtubei_context(auth, bootstrap),
         "feedbackTokens": [token]
     });
-    request_youtubei_path(client, auth, bootstrap, "feedback", &body, None, 0)?;
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        "feedback",
+        &body,
+        RequestPolicy::mutation(),
+    )?;
     Ok(())
 }
 
@@ -422,7 +466,14 @@ fn apply_playlist_library_rating(
         "context": youtubei_context(auth, bootstrap),
         "target": { "playlistId": clean_playlist_id(playlist_id) }
     });
-    request_youtubei_path(client, auth, bootstrap, path, &body, None, 0)?;
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        path,
+        &body,
+        RequestPolicy::mutation(),
+    )?;
     Ok(())
 }
 
@@ -505,6 +556,30 @@ impl From<BootstrapCache> for Bootstrap {
 
 pub fn bootstrap_cache_path(auth_path: &Path) -> PathBuf {
     auth_path.with_file_name("bootstrap-cache.json")
+}
+
+pub fn clear_response_cache(bootstrap_cache_path: &Path) -> Result<(), String> {
+    let cache_dir = response_cache_dir(bootstrap_cache_path);
+    match fs::remove_dir_all(&cache_dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot clear response cache `{}`: {error}",
+            cache_dir.display()
+        )),
+    }
+}
+
+pub fn clear_account_cache(bootstrap_cache_path: &Path) -> Result<(), String> {
+    clear_response_cache(bootstrap_cache_path)?;
+    match fs::remove_file(bootstrap_cache_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot clear bootstrap cache `{}`: {error}",
+            bootstrap_cache_path.display()
+        )),
+    }
 }
 
 fn bootstrap_with_cache(
@@ -923,8 +998,7 @@ fn request_search(
         bootstrap,
         "search",
         &body,
-        cache_dir,
-        RESPONSE_CACHE_TTL_SECS,
+        RequestPolicy::read(cache_dir, RESPONSE_CACHE_TTL_SECS),
     )
 }
 
@@ -941,7 +1015,14 @@ fn request_song_next(
         "isAudioOnly": true,
         "tunerSettingValue": "AUTOMIX_SETTING_NORMAL"
     });
-    request_youtubei_path(client, auth, bootstrap, "next", &body, None, 0)
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        "next",
+        &body,
+        RequestPolicy::read(None, 0),
+    )
 }
 
 fn request_radio_queue(
@@ -958,7 +1039,14 @@ fn request_radio_queue(
         "isAudioOnly": true,
         "tunerSettingValue": "AUTOMIX_SETTING_NORMAL"
     });
-    request_youtubei_path(client, auth, bootstrap, "next", &body, None, 0)
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        "next",
+        &body,
+        RequestPolicy::read(None, 0),
+    )
 }
 
 fn request_add_to_playlist_options(
@@ -978,8 +1066,7 @@ fn request_add_to_playlist_options(
         bootstrap,
         "playlist/get_add_to_playlist",
         &body,
-        cache_dir,
-        RESPONSE_CACHE_TTL_SECS,
+        RequestPolicy::read(cache_dir, RESPONSE_CACHE_TTL_SECS),
     )
 }
 
@@ -1012,7 +1099,14 @@ fn request_youtubei(
     cache_dir: Option<&Path>,
     ttl_secs: u64,
 ) -> Result<Value, String> {
-    request_youtubei_path(client, auth, bootstrap, "browse", body, cache_dir, ttl_secs)
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        "browse",
+        body,
+        RequestPolicy::read(cache_dir, ttl_secs),
+    )
 }
 
 fn request_youtubei_path(
@@ -1021,10 +1115,10 @@ fn request_youtubei_path(
     bootstrap: &Bootstrap,
     path: &str,
     body: &Value,
-    cache_dir: Option<&Path>,
-    ttl_secs: u64,
+    policy: RequestPolicy<'_>,
 ) -> Result<Value, String> {
-    let cache_file = cache_dir
+    let cache_file = policy
+        .cache_dir
         .map(|cache_dir| {
             response_cache_key(auth, bootstrap, path, body)
                 .map(|key| response_cache_file(cache_dir, &key))
@@ -1059,7 +1153,7 @@ fn request_youtubei_path(
         "{YTM_ORIGIN}/youtubei/v1/{path}?alt=json&key={}",
         bootstrap.api_key
     );
-    let response = send_youtubei_request(client, &url, headers, body, path)
+    let response = send_youtubei_request(client, &url, headers, body, path, policy.send)
         .map_err(|error| format!("YouTube Music {path} request failed: {error}"))?;
     let status = response.status();
     let response_body = response
@@ -1081,7 +1175,7 @@ fn request_youtubei_path(
     let value = serde_json::from_str(&response_body)
         .map_err(|error| format!("invalid YouTube Music response: {error}"))?;
     if let Some(cache_file) = &cache_file {
-        if let Err(error) = save_response_cache(cache_file, &value, ttl_secs) {
+        if let Err(error) = save_response_cache(cache_file, &value, policy.cache_ttl_secs) {
             log_diagnostic(&format!("response-cache-write-error={error}"));
         } else if let Some(cache_dir) = cache_file.parent() {
             prune_response_cache(cache_dir);
@@ -1096,8 +1190,10 @@ fn send_youtubei_request(
     headers: HeaderMap,
     body: &Value,
     path: &str,
+    send_policy: SendPolicy,
 ) -> Result<reqwest::blocking::Response, String> {
-    retry_send_operation(
+    send_operation(
+        send_policy,
         || client.post(url).headers(headers.clone()).json(body).send(),
         |attempt, delay, error| {
             log_diagnostic(&format!(
@@ -1107,6 +1203,18 @@ fn send_youtubei_request(
             thread::sleep(delay);
         },
     )
+}
+
+fn send_operation<T, E, F, R>(policy: SendPolicy, mut operation: F, retry: R) -> Result<T, String>
+where
+    E: Error + 'static,
+    F: FnMut() -> Result<T, E>,
+    R: FnMut(usize, Duration, &str),
+{
+    match policy {
+        SendPolicy::Read => retry_send_operation(operation, retry),
+        SendPolicy::Mutation => operation().map_err(|error| error_chain_message(&error)),
+    }
 }
 
 fn retry_send_operation<T, E, F, R>(mut operation: F, mut retry: R) -> Result<T, String>
@@ -2318,7 +2426,14 @@ fn request_subscription_endpoint(
             object.insert("params".to_string(), Value::String(params.clone()));
         }
     }
-    request_youtubei_path(client, auth, bootstrap, path, &body, None, 0)?;
+    request_youtubei_path(
+        client,
+        auth,
+        bootstrap,
+        path,
+        &body,
+        RequestPolicy::mutation(),
+    )?;
     Ok(())
 }
 
@@ -3869,6 +3984,28 @@ mod tests {
     }
 
     #[test]
+    fn mutation_send_policy_never_retries() {
+        let mut attempts = 0;
+        let mut retries = 0;
+        let error = send_operation(
+            SendPolicy::Mutation,
+            || -> Result<(), std::io::Error> {
+                attempts += 1;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "response lost",
+                ))
+            },
+            |_attempt, _delay, _error| retries += 1,
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, 1);
+        assert_eq!(retries, 0);
+        assert_eq!(error, "response lost");
+    }
+
+    #[test]
     fn retry_send_error_reports_error_chain_and_attempt_count() {
         let mut attempts = 0;
         let mut retry_attempts = Vec::new();
@@ -4101,6 +4238,24 @@ mod tests {
         fs::write(&cache_file, serde_json::to_vec(&cache).unwrap()).unwrap();
 
         assert!(load_response_cache(&cache_file).is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn account_cache_clear_owns_bootstrap_and_response_paths() {
+        let directory = temporary_test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let bootstrap_cache = directory.join("bootstrap-cache.json");
+        let response_cache = response_cache_dir(&bootstrap_cache);
+        fs::write(&bootstrap_cache, "{}").unwrap();
+        fs::create_dir_all(&response_cache).unwrap();
+        fs::write(response_cache.join("entry.json"), "{}").unwrap();
+
+        clear_account_cache(&bootstrap_cache).unwrap();
+
+        assert!(!bootstrap_cache.exists());
+        assert!(!response_cache.exists());
+        clear_account_cache(&bootstrap_cache).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

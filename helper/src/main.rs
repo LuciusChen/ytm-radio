@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
 use ytmusic::{
-    add_to_playlist, bootstrap_cache_path, browse, browse_id as browse_detail, continuation,
-    item_library, library, playlist_options, radio, rate, search, subscription, track_status,
-    BrowseTarget,
+    add_to_playlist, bootstrap_cache_path, browse, browse_id as browse_detail, clear_account_cache,
+    clear_response_cache, continuation, item_library, library, playlist_options, radio, rate,
+    search, subscription, track_status, BrowseTarget,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -80,6 +80,19 @@ enum Command {
     },
 }
 
+impl Command {
+    fn mutation_p(&self) -> bool {
+        matches!(
+            self,
+            Self::Rate { .. }
+                | Self::AddToPlaylist { .. }
+                | Self::Library { .. }
+                | Self::ItemLibrary { .. }
+                | Self::Subscription { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
     command: Command,
@@ -87,6 +100,7 @@ struct Options {
     limit: usize,
     mock_data: bool,
     initial_only: bool,
+    fresh: bool,
     proxy: Option<String>,
 }
 
@@ -101,6 +115,26 @@ struct Envelope<T> {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ErrorPayload {
+    code: &'static str,
+    message: String,
+    retryable: bool,
+    #[serde(rename = "auth-required")]
+    auth_required: bool,
+}
+
+#[derive(Serialize)]
+struct ErrorEnvelope {
+    ok: bool,
+    schema: u32,
+    protocol: u32,
+    #[serde(rename = "helper-version")]
+    helper_version: &'static str,
+    error: ErrorPayload,
+    warnings: Vec<String>,
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if help_requested(&args) {
@@ -111,8 +145,66 @@ fn main() {
         Ok(output) => println!("{output}"),
         Err(error) => {
             eprintln!("{error}");
+            println!("{}", encode_error(&error));
             process::exit(1);
         }
+    }
+}
+
+fn encode_error(message: &str) -> String {
+    serde_json::to_string(&ErrorEnvelope {
+        ok: false,
+        schema: SCHEMA_VERSION,
+        protocol: HELPER_PROTOCOL_VERSION,
+        helper_version: HELPER_VERSION,
+        error: classify_error(message),
+        warnings: Vec::new(),
+    })
+    .expect("error envelope is serializable")
+}
+
+fn classify_error(message: &str) -> ErrorPayload {
+    let lowercase = message.to_ascii_lowercase();
+    let browser_restart_required = lowercase.contains("already running without");
+    let auth_required = lowercase.contains("http 401")
+        || lowercase.contains("http 403")
+        || lowercase.contains("required authentication credential")
+        || lowercase.contains("auth file")
+        || lowercase.contains("auth cookie")
+        || lowercase.contains("unsupported auth source")
+        || lowercase.contains("missing --auth");
+    let network = lowercase.contains("error sending request")
+        || lowercase.contains("connection")
+        || lowercase.contains("timed out")
+        || lowercase.contains("timeout")
+        || lowercase.contains("cannot load youtube music");
+    let remote_retryable = lowercase.contains("http 429") || lowercase.contains("http 5");
+    let invalid_request = lowercase.starts_with("unknown ")
+        || lowercase.starts_with("expected ")
+        || lowercase.starts_with("missing option")
+        || lowercase.starts_with("invalid ")
+        || lowercase.contains("must not be empty")
+        || lowercase.contains("must be greater than zero")
+        || lowercase.contains("does not accept request options")
+        || lowercase.contains("options require");
+    let (code, retryable) = if browser_restart_required {
+        ("browser-restart-required", false)
+    } else if auth_required {
+        ("auth-required", false)
+    } else if network {
+        ("network", true)
+    } else if remote_retryable {
+        ("remote-response", true)
+    } else if invalid_request {
+        ("invalid-request", false)
+    } else {
+        ("helper-failure", false)
+    };
+    ErrorPayload {
+        code,
+        message: message.to_string(),
+        retryable,
+        auth_required,
     }
 }
 
@@ -130,6 +222,10 @@ where
 {
     let options = parse_args(args)?;
     let proxy = options.proxy.as_deref();
+    if options.fresh && !options.mock_data {
+        let auth_path = required_auth_path(&options)?;
+        clear_response_cache(&bootstrap_cache_path(auth_path))?;
+    }
     let data = match &options.command {
         Command::Version => {
             json!({
@@ -166,6 +262,9 @@ where
                 *restart_running,
                 proxy,
             )?;
+            if let Err(error) = clear_account_cache(&bootstrap_cache_path(output)) {
+                eprintln!("ytm-radio-helper cache-invalidation-error={error}");
+            }
             json!({
                 "auth": {
                     "configured": true,
@@ -330,6 +429,12 @@ where
             track_status(video_id, &auth, Some(&cache_path), proxy)?
         }
     };
+    if options.command.mutation_p() && !options.mock_data {
+        let auth_path = required_auth_path(&options)?;
+        if let Err(error) = clear_response_cache(&bootstrap_cache_path(auth_path)) {
+            eprintln!("ytm-radio-helper cache-invalidation-error={error}");
+        }
+    }
     serde_json::to_string(&Envelope {
         ok: true,
         schema: SCHEMA_VERSION,
@@ -397,6 +502,7 @@ where
     let mut profile_dir = None;
     let mut browse_params = None;
     let mut initial_only = false;
+    let mut fresh = false;
     let mut timeout_secs = None;
     let mut restart_running = false;
     let mut proxy = None;
@@ -442,6 +548,7 @@ where
                 browse_params = Some(value.to_string());
             }
             "--initial-only" => initial_only = true,
+            "--fresh" => fresh = true,
             "--restart-running" => restart_running = true,
             "--proxy" => {
                 let value = option_value(&args, &mut index)?.trim();
@@ -457,7 +564,8 @@ where
 
     let command = match command {
         Command::AuthLoginWindow { .. } => {
-            if browse_params.is_some() || initial_only || mock_data || auth_file.is_some() {
+            if browse_params.is_some() || initial_only || fresh || mock_data || auth_file.is_some()
+            {
                 return Err("browse options require a browse action".to_string());
             }
             let output = output.ok_or_else(|| "missing --output FILE".to_string())?;
@@ -479,6 +587,7 @@ where
                 || restart_running
                 || browse_params.is_some()
                 || initial_only
+                || fresh
                 || mock_data
                 || auth_file.is_some()
                 || proxy.is_some()
@@ -570,7 +679,7 @@ where
             {
                 return Err("auth options require an auth action".to_string());
             }
-            if browse_params.is_some() || initial_only || mock_data {
+            if browse_params.is_some() || initial_only || fresh || mock_data {
                 return Err("browse options require a browse action".to_string());
             }
             Command::AuthCheck
@@ -597,6 +706,7 @@ where
         limit,
         mock_data,
         initial_only,
+        fresh,
         proxy,
     })
 }
@@ -804,11 +914,11 @@ fn usage() -> String {
         "  ytm-radio-helper version",
         "  ytm-radio-helper auth check --auth FILE",
         "  ytm-radio-helper auth login-window --output FILE [--browser BROWSER] [--profile-dir DIR] [--port N] [--timeout-secs N] [--restart-running] [--proxy URL]",
-        "  ytm-radio-helper browse home --auth FILE [--limit N] [--initial-only]",
-        "  ytm-radio-helper browse explore|library|library-songs|library-albums|library-artists|library-playlists|liked --auth FILE [--limit N]",
-        "  ytm-radio-helper browse-id BROWSE_ID --auth FILE [--params PARAMS] [--limit N]",
-        "  ytm-radio-helper continuation TOKEN --auth FILE [--limit N]",
-        "  ytm-radio-helper search QUERY --auth FILE [--limit N]",
+        "  ytm-radio-helper browse home --auth FILE [--limit N] [--initial-only] [--fresh]",
+        "  ytm-radio-helper browse explore|library|library-songs|library-albums|library-artists|library-playlists|liked --auth FILE [--limit N] [--fresh]",
+        "  ytm-radio-helper browse-id BROWSE_ID --auth FILE [--params PARAMS] [--limit N] [--fresh]",
+        "  ytm-radio-helper continuation TOKEN --auth FILE [--limit N] [--fresh]",
+        "  ytm-radio-helper search QUERY --auth FILE [--limit N] [--fresh]",
         "  ytm-radio-helper rate VIDEO_ID like|dislike|indifferent --auth FILE",
         "  ytm-radio-helper radio VIDEO_ID --auth FILE [--limit N]",
         "  ytm-radio-helper playlist-options VIDEO_ID --auth FILE",
@@ -1299,6 +1409,7 @@ mod tests {
                 limit: 2,
                 mock_data: true,
                 initial_only: false,
+                fresh: false,
                 proxy: None,
             }
         );
@@ -1316,6 +1427,7 @@ mod tests {
                 limit: 2,
                 mock_data: true,
                 initial_only: true,
+                fresh: false,
                 proxy: None,
             }
         );
@@ -1359,6 +1471,7 @@ mod tests {
                 limit: 5,
                 mock_data: true,
                 initial_only: false,
+                fresh: false,
                 proxy: None,
             }
         );
@@ -1390,6 +1503,7 @@ mod tests {
                 limit: 2,
                 mock_data: true,
                 initial_only: false,
+                fresh: false,
                 proxy: None,
             }
         );
@@ -1407,6 +1521,12 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(options.proxy, Some("socks5h://127.0.0.1:7890".to_string()));
+    }
+
+    #[test]
+    fn parses_fresh_for_request_commands() {
+        let options = parse_args(["browse", "home", "--mock", "--fresh"]).unwrap();
+        assert!(options.fresh);
     }
 
     #[test]
@@ -1428,6 +1548,7 @@ mod tests {
                 limit: 3,
                 mock_data: true,
                 initial_only: false,
+                fresh: false,
                 proxy: None,
             }
         );
@@ -1461,6 +1582,7 @@ mod tests {
                 limit: 100,
                 mock_data: true,
                 initial_only: false,
+                fresh: false,
                 proxy: None,
             }
         );
@@ -1625,6 +1747,34 @@ mod tests {
         assert_eq!(parsed["data"]["schema"], SCHEMA_VERSION);
         assert_eq!(parsed["data"]["protocol"], HELPER_PROTOCOL_VERSION);
         assert_eq!(parsed["data"]["helper-version"], HELPER_VERSION);
+    }
+
+    #[test]
+    fn error_envelope_classifies_auth_and_network_failures() {
+        let auth: Value = serde_json::from_str(&encode_error(
+            "YouTube Music returned HTTP 401 Unauthorized",
+        ))
+        .unwrap();
+        assert_eq!(auth["ok"], false);
+        assert_eq!(auth["error"]["code"], "auth-required");
+        assert_eq!(auth["error"]["auth-required"], true);
+        assert_eq!(auth["error"]["retryable"], false);
+
+        let network: Value = serde_json::from_str(&encode_error(
+            "YouTube Music browse request failed: error sending request",
+        ))
+        .unwrap();
+        assert_eq!(network["error"]["code"], "network");
+        assert_eq!(network["error"]["auth-required"], false);
+        assert_eq!(network["error"]["retryable"], true);
+
+        let browser: Value = serde_json::from_str(&encode_error(
+            "Zen is already running without WebDriver BiDi on 127.0.0.1:29317",
+        ))
+        .unwrap();
+        assert_eq!(browser["error"]["code"], "browser-restart-required");
+        assert_eq!(browser["error"]["auth-required"], false);
+        assert_eq!(browser["error"]["retryable"], false);
     }
 
     #[test]

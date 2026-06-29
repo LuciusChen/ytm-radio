@@ -16,6 +16,8 @@ use tungstenite::{connect, Message, WebSocket};
 const YTM_ORIGIN: &str = "https://music.youtube.com";
 const YTM_ORIGIN_ENCODED: &str = "https%3A%2F%2Fmusic.youtube.com";
 const DEFAULT_DIA_LOGIN_BROWSER_PATH: &str = "/Applications/Dia.app/Contents/MacOS/Dia";
+const LOGIN_BROWSER_CHOICES: &str =
+    "chrome, brave, edge, chromium, firefox, zen, dia, or an executable path";
 const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -121,7 +123,7 @@ pub fn login_window(
 ) -> Result<AuthConfig, String> {
     let browser = resolve_login_browser(browser)?;
     let profile_dir = effective_login_profile_dir(output, &browser, profile_dir);
-    match browser.protocol {
+    match browser.protocol() {
         LoginProtocol::Cdp => login_window_cdp(
             output,
             &browser,
@@ -154,7 +156,7 @@ fn effective_login_profile_dir(
 }
 
 fn automatic_login_profile_dir(output: &Path, browser: &LoginBrowser) -> Option<PathBuf> {
-    if browser.name == "chrome" {
+    if browser.kind == BrowserKind::Chrome {
         Some(output.with_file_name("login-profile"))
     } else {
         None
@@ -207,7 +209,7 @@ fn login_window_cdp(
     };
     let result = (|| {
         let target = open_music_login_target(&client, &base_url)?;
-        let config = wait_for_login_config(&target, &version, browser.name.as_str(), timeout)?;
+        let config = wait_for_login_config(&target, &version, browser.name(), timeout)?;
         write_private_json(output, &config)?;
         Ok(config)
     })();
@@ -264,7 +266,7 @@ fn login_window_bidi(
     let result = (|| {
         let context = open_music_bidi_context(&mut connection)?;
         let config =
-            wait_for_bidi_login_config(&mut connection, &context, browser.name.as_str(), timeout)?;
+            wait_for_bidi_login_config(&mut connection, &context, browser.name(), timeout)?;
         write_private_json(output, &config)?;
         Ok(config)
     })();
@@ -405,15 +407,15 @@ fn running_login_browser_conflict(
     if !login_browser_is_running(browser) {
         return None;
     }
-    if isolated_profile && browser.name != "dia" {
+    if isolated_profile && browser.kind != BrowserKind::Dia {
         return None;
     }
-    if browser.name == "dia" {
+    if browser.kind == BrowserKind::Dia {
         return Some(format!(
             "Dia is already running without {} on 127.0.0.1:{port}; \
              close Dia and run login again. Dia only permits one instance, \
              so ytm-radio will not start a second Dia process.",
-            browser.protocol.endpoint_name()
+            browser.protocol().endpoint_name()
         ));
     }
     Some(format!(
@@ -421,7 +423,7 @@ fn running_login_browser_conflict(
          close it and run login again, or set ytm-radio-helper-login-profile-directory \
          for an isolated login profile.",
         browser.executable.display(),
-        browser.protocol.endpoint_name()
+        browser.protocol().endpoint_name()
     ))
 }
 
@@ -617,6 +619,40 @@ enum LoginProtocol {
     Bidi,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrowserKind {
+    Chrome,
+    Brave,
+    Edge,
+    Chromium,
+    Firefox,
+    Zen,
+    Dia,
+    Custom(String),
+}
+
+impl BrowserKind {
+    fn name(&self) -> &str {
+        match self {
+            Self::Chrome => "chrome",
+            Self::Brave => "brave",
+            Self::Edge => "edge",
+            Self::Chromium => "chromium",
+            Self::Firefox => "firefox",
+            Self::Zen => "zen",
+            Self::Dia => "dia",
+            Self::Custom(name) => name,
+        }
+    }
+
+    fn protocol(&self) -> LoginProtocol {
+        match self {
+            Self::Firefox | Self::Zen => LoginProtocol::Bidi,
+            _ => LoginProtocol::Cdp,
+        }
+    }
+}
+
 impl LoginProtocol {
     fn endpoint_name(self) -> &'static str {
         match self {
@@ -636,9 +672,18 @@ struct BidiConnection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LoginBrowser {
-    name: String,
+    kind: BrowserKind,
     executable: PathBuf,
-    protocol: LoginProtocol,
+}
+
+impl LoginBrowser {
+    fn name(&self) -> &str {
+        self.kind.name()
+    }
+
+    fn protocol(&self) -> LoginProtocol {
+        self.kind.protocol()
+    }
 }
 
 fn cdp_base_url(port: u16) -> String {
@@ -677,21 +722,16 @@ fn resolve_login_browser(requested: Option<&str>) -> Result<LoginBrowser, String
         if requested.contains('/') || requested.contains('\\') {
             let executable = PathBuf::from(requested);
             if executable.exists() {
-                let (name, protocol) = supported_login_browser(&executable).unwrap_or_else(|| {
-                    (
+                let kind = supported_login_browser(&executable).unwrap_or_else(|| {
+                    BrowserKind::Custom(
                         executable
                             .file_stem()
                             .and_then(|name| name.to_str())
                             .unwrap_or("custom")
                             .to_string(),
-                        LoginProtocol::Cdp,
                     )
                 });
-                return Ok(LoginBrowser {
-                    name,
-                    executable,
-                    protocol,
-                });
+                return Ok(LoginBrowser { kind, executable });
             }
             return Err(format!(
                 "cannot find login browser executable `{requested}`"
@@ -699,12 +739,12 @@ fn resolve_login_browser(requested: Option<&str>) -> Result<LoginBrowser, String
         }
         let requested_lower = requested.to_ascii_lowercase();
         if let Some(browser) = login_browser_candidates().into_iter().find(|candidate| {
-            candidate.name == requested_lower && login_browser_is_available(candidate)
+            candidate.name() == requested_lower && login_browser_is_available(candidate)
         }) {
             return Ok(browser);
         }
         return Err(format!(
-            "cannot find login browser `{requested}`; try chrome, brave, edge, chromium, firefox, dia, or an executable path"
+            "cannot find login browser `{requested}`; try {LOGIN_BROWSER_CHOICES}"
         ));
     }
 
@@ -717,7 +757,7 @@ fn resolve_default_login_browser() -> Result<LoginBrowser, String> {
         return Ok(browser);
     }
     Err(format!(
-        "default login browser `{}` is not available; set ytm-radio-helper-login-browser to chrome, brave, edge, chromium, firefox, dia, or an executable path",
+        "default login browser `{}` is not available; set ytm-radio-helper-login-browser to {LOGIN_BROWSER_CHOICES}",
         browser.executable.display()
     ))
 }
@@ -864,17 +904,22 @@ fn command_stdout(program: &str, arguments: &[&str]) -> Option<String> {
 }
 
 fn supported_default_login_browser(executable: PathBuf) -> Result<LoginBrowser, String> {
-    let Some((name, protocol)) = supported_login_browser(&executable) else {
+    let Some(kind) = supported_login_browser(&executable) else {
         return Err(format!(
-            "default browser `{}` is not supported for login; set ytm-radio-helper-login-browser to chrome, brave, edge, chromium, firefox, dia, or a compatible executable path",
+            "default browser `{}` is not supported for login; set ytm-radio-helper-login-browser to {LOGIN_BROWSER_CHOICES}",
             executable.display()
         ));
     };
-    Ok(login_browser_path(&name, executable, protocol))
+    Ok(login_browser_path(kind, executable))
 }
 
-fn supported_login_browser(executable: &Path) -> Option<(String, LoginProtocol)> {
+fn supported_login_browser(executable: &Path) -> Option<BrowserKind> {
     let path = executable.to_string_lossy().to_ascii_lowercase();
+    let file_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let file = executable
         .file_stem()
         .and_then(|name| name.to_str())
@@ -886,18 +931,22 @@ fn supported_login_browser(executable: &Path) -> Option<(String, LoginProtocol)>
             "google-chrome" | "google-chrome-stable" | "chrome"
         )
     {
-        Some(("chrome".to_string(), LoginProtocol::Cdp))
+        Some(BrowserKind::Chrome)
     } else if path.contains("brave browser") || file == "brave-browser" || file == "brave" {
-        Some(("brave".to_string(), LoginProtocol::Cdp))
+        Some(BrowserKind::Brave)
     } else if path.contains("microsoft edge") || file == "microsoft-edge" {
-        Some(("edge".to_string(), LoginProtocol::Cdp))
+        Some(BrowserKind::Edge)
     } else if path.contains("chromium") || matches!(file.as_str(), "chromium" | "chromium-browser")
     {
-        Some(("chromium".to_string(), LoginProtocol::Cdp))
+        Some(BrowserKind::Chromium)
     } else if path.contains("firefox") || file == "firefox" {
-        Some(("firefox".to_string(), LoginProtocol::Bidi))
+        Some(BrowserKind::Firefox)
+    } else if matches!(file.as_str(), "zen" | "zen-browser")
+        || (file_name.ends_with(".appimage") && file.starts_with("zen-"))
+    {
+        Some(BrowserKind::Zen)
     } else if path.contains("/dia.app/") || file == "dia" {
-        Some(("dia".to_string(), LoginProtocol::Cdp))
+        Some(BrowserKind::Dia)
     } else {
         None
     }
@@ -1011,54 +1060,54 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
     {
         candidates.extend([
             login_browser(
-                "chrome",
+                BrowserKind::Chrome,
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             ),
             login_browser(
-                "brave",
+                BrowserKind::Brave,
                 "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
             ),
             login_browser(
-                "edge",
+                BrowserKind::Edge,
                 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             ),
             login_browser(
-                "chromium",
+                BrowserKind::Chromium,
                 "/Applications/Chromium.app/Contents/MacOS/Chromium",
             ),
             login_browser(
-                "firefox",
+                BrowserKind::Firefox,
                 "/Applications/Firefox.app/Contents/MacOS/firefox",
             ),
-            login_browser("dia", DEFAULT_DIA_LOGIN_BROWSER_PATH),
+            login_browser(BrowserKind::Zen, "/Applications/Zen.app/Contents/MacOS/zen"),
+            login_browser(BrowserKind::Dia, DEFAULT_DIA_LOGIN_BROWSER_PATH),
         ]);
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
             candidates.extend([
                 login_browser_path(
-                    "chrome",
+                    BrowserKind::Chrome,
                     home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
-                    "brave",
+                    BrowserKind::Brave,
                     home.join("Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
-                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
-                    "edge",
+                    BrowserKind::Edge,
                     home.join("Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
-                    "chromium",
+                    BrowserKind::Chromium,
                     home.join("Applications/Chromium.app/Contents/MacOS/Chromium"),
-                    LoginProtocol::Cdp,
                 ),
                 login_browser_path(
-                    "firefox",
+                    BrowserKind::Firefox,
                     home.join("Applications/Firefox.app/Contents/MacOS/firefox"),
-                    LoginProtocol::Bidi,
+                ),
+                login_browser_path(
+                    BrowserKind::Zen,
+                    home.join("Applications/Zen.app/Contents/MacOS/zen"),
                 ),
             ]);
         }
@@ -1066,41 +1115,27 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
     #[cfg(not(target_os = "macos"))]
     {
         candidates.extend([
-            login_browser("chrome", "google-chrome"),
-            login_browser("chrome", "google-chrome-stable"),
-            login_browser("brave", "brave-browser"),
-            login_browser("edge", "microsoft-edge"),
-            login_browser("chromium", "chromium"),
-            login_browser("chromium", "chromium-browser"),
-            login_browser("firefox", "firefox"),
-            login_browser("firefox", "firefox-developer-edition"),
+            login_browser(BrowserKind::Chrome, "google-chrome"),
+            login_browser(BrowserKind::Chrome, "google-chrome-stable"),
+            login_browser(BrowserKind::Brave, "brave-browser"),
+            login_browser(BrowserKind::Edge, "microsoft-edge"),
+            login_browser(BrowserKind::Chromium, "chromium"),
+            login_browser(BrowserKind::Chromium, "chromium-browser"),
+            login_browser(BrowserKind::Firefox, "firefox"),
+            login_browser(BrowserKind::Firefox, "firefox-developer-edition"),
+            login_browser(BrowserKind::Zen, "zen"),
+            login_browser(BrowserKind::Zen, "zen-browser"),
         ]);
     }
     candidates
 }
 
-fn login_browser(name: &str, executable: &str) -> LoginBrowser {
-    login_browser_path(
-        name,
-        PathBuf::from(executable),
-        login_browser_protocol(name),
-    )
+fn login_browser(kind: BrowserKind, executable: &str) -> LoginBrowser {
+    login_browser_path(kind, PathBuf::from(executable))
 }
 
-fn login_browser_path(name: &str, executable: PathBuf, protocol: LoginProtocol) -> LoginBrowser {
-    LoginBrowser {
-        name: name.to_string(),
-        executable,
-        protocol,
-    }
-}
-
-fn login_browser_protocol(name: &str) -> LoginProtocol {
-    if name.eq_ignore_ascii_case("firefox") {
-        LoginProtocol::Bidi
-    } else {
-        LoginProtocol::Cdp
-    }
+fn login_browser_path(kind: BrowserKind, executable: PathBuf) -> LoginBrowser {
+    LoginBrowser { kind, executable }
 }
 
 fn login_browser_is_available(browser: &LoginBrowser) -> bool {
@@ -1122,7 +1157,7 @@ fn spawn_login_browser(
     port: u16,
     proxy: Option<&str>,
 ) -> Result<Child, String> {
-    match browser.protocol {
+    match browser.protocol() {
         LoginProtocol::Cdp => spawn_cdp_login_browser(browser, profile_dir, port, proxy),
         LoginProtocol::Bidi => spawn_bidi_login_browser(browser, profile_dir, port),
     }
@@ -1521,11 +1556,7 @@ impl BidiConnection {
         let result = self.call(
             "session.new",
             json!({
-                "capabilities": {
-                    "alwaysMatch": {
-                        "browserName": "firefox"
-                    }
-                }
+                "capabilities": {}
             }),
         )?;
         self.user_agent = result
@@ -1949,7 +1980,7 @@ mod tests {
 
     #[test]
     fn chrome_uses_automatic_login_profile_by_default() {
-        let browser = login_browser("chrome", "google-chrome");
+        let browser = login_browser(BrowserKind::Chrome, "google-chrome");
         let output = Path::new("/tmp/ytm-radio/auth.json");
 
         assert_eq!(
@@ -1965,20 +1996,24 @@ mod tests {
         assert_eq!(
             effective_login_profile_dir(
                 output,
-                &login_browser("dia", DEFAULT_DIA_LOGIN_BROWSER_PATH),
+                &login_browser(BrowserKind::Dia, DEFAULT_DIA_LOGIN_BROWSER_PATH),
                 None
             ),
             None
         );
         assert_eq!(
-            effective_login_profile_dir(output, &login_browser("firefox", "firefox"), None),
+            effective_login_profile_dir(
+                output,
+                &login_browser(BrowserKind::Firefox, "firefox"),
+                None
+            ),
             None
         );
     }
 
     #[test]
     fn explicit_login_profile_overrides_automatic_default() {
-        let browser = login_browser("chrome", "google-chrome");
+        let browser = login_browser(BrowserKind::Chrome, "google-chrome");
         let output = Path::new("/tmp/ytm-radio/auth.json");
         let profile = Path::new("/tmp/custom-login-profile");
 
@@ -2016,9 +2051,9 @@ mod tests {
 
         let resolved = resolve_login_browser(Some(browser.to_str().unwrap())).unwrap();
 
-        assert_eq!(resolved.name, "Test Browser");
+        assert_eq!(resolved.name(), "Test Browser");
         assert_eq!(resolved.executable, browser);
-        assert_eq!(resolved.protocol, LoginProtocol::Cdp);
+        assert_eq!(resolved.protocol(), LoginProtocol::Cdp);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2031,9 +2066,24 @@ mod tests {
 
         let resolved = resolve_login_browser(Some(browser.to_str().unwrap())).unwrap();
 
-        assert_eq!(resolved.name, "firefox");
+        assert_eq!(resolved.name(), "firefox");
         assert_eq!(resolved.executable, browser);
-        assert_eq!(resolved.protocol, LoginProtocol::Bidi);
+        assert_eq!(resolved.protocol(), LoginProtocol::Bidi);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn resolves_zen_path_to_bidi_login_browser() {
+        let directory = temporary_test_directory();
+        fs::create_dir_all(&directory).unwrap();
+        let browser = directory.join("zen");
+        fs::write(&browser, "").unwrap();
+
+        let resolved = resolve_login_browser(Some(browser.to_str().unwrap())).unwrap();
+
+        assert_eq!(resolved.name(), "zen");
+        assert_eq!(resolved.executable, browser);
+        assert_eq!(resolved.protocol(), LoginProtocol::Bidi);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2041,21 +2091,33 @@ mod tests {
     fn recognizes_supported_default_browser_paths() {
         assert_eq!(
             supported_login_browser(Path::new("/Applications/Dia.app/Contents/MacOS/Dia")),
-            Some(("dia".to_string(), LoginProtocol::Cdp))
+            Some(BrowserKind::Dia)
         );
         assert_eq!(
             supported_login_browser(Path::new(
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
             )),
-            Some(("chrome".to_string(), LoginProtocol::Cdp))
+            Some(BrowserKind::Chrome)
         );
         assert_eq!(
             supported_login_browser(Path::new("/usr/bin/brave-browser")),
-            Some(("brave".to_string(), LoginProtocol::Cdp))
+            Some(BrowserKind::Brave)
         );
         assert_eq!(
             supported_login_browser(Path::new("/usr/bin/firefox")),
-            Some(("firefox".to_string(), LoginProtocol::Bidi))
+            Some(BrowserKind::Firefox)
+        );
+        assert_eq!(
+            supported_login_browser(Path::new("/Applications/Zen.app/Contents/MacOS/zen")),
+            Some(BrowserKind::Zen)
+        );
+        assert_eq!(
+            supported_login_browser(Path::new("/usr/bin/zen")),
+            Some(BrowserKind::Zen)
+        );
+        assert_eq!(
+            supported_login_browser(Path::new("/opt/zen-x86_64.AppImage")),
+            Some(BrowserKind::Zen)
         );
     }
 

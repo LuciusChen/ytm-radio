@@ -572,9 +572,10 @@ FIELDS are included on both the top-level mutation output and source."
                         "https://music.youtube.com/watch?v=v1"
                         "replace")
                       commands))
+      (should (member '("set_property" "pause" :json-false) commands))
       (should (eq (map-elt ytm-radio--player :status) 'loading))
       (should-not (map-elt ytm-radio--player :using-stream-cache))
-      (should (map-elt ytm-radio--player :retried-original-url)))))
+      (should (eq (map-elt ytm-radio--player :retry-stage) 'original)))))
 
 (ert-deftest ytm-radio-mpv-error-retries-original-url-once ()
   "Retry a transient mpv playback error once for the original track URL."
@@ -613,7 +614,7 @@ FIELDS are included on both the top-level mutation output and source."
                         "replace")
                       commands))
       (should (eq (map-elt ytm-radio--player :status) 'loading))
-      (should (map-elt ytm-radio--player :retried-playback-error))
+      (should (eq (map-elt ytm-radio--player :retry-stage) 'final))
       (should (member "Playback failed; retrying" messages))
       (let ((command-count (length commands)))
         (ytm-radio--mpv-event
@@ -648,11 +649,11 @@ FIELDS are included on both the top-level mutation output and source."
                (lambda (&rest _args)
                  (error "Process ytm-radio-mpv-ipc no longer connected")))
               ((symbol-function 'ytm-radio--stop-process)
-               (lambda ()
-                 (setq stopped-preserve
-                       ytm-radio--preserve-playback-retry-state)))
+               (lambda (&optional preserve-retry-stage)
+                 (setq stopped-preserve preserve-retry-stage)))
               ((symbol-function 'ytm-radio--play-track)
-               (lambda (track) (setq retried-track track)))
+               (lambda (track &optional _preserve-retry-stage)
+                 (setq retried-track track)))
               ((symbol-function 'message) #'ignore))
       (ytm-radio--mpv-event
        "end-file"
@@ -660,7 +661,7 @@ FIELDS are included on both the top-level mutation output and source."
          (file_error . "no audio or video data played")))
       (should (equal retried-track track))
       (should stopped-preserve)
-      (should (map-elt ytm-radio--player :retried-playback-error))
+      (should (eq (map-elt ytm-radio--player :retry-stage) 'final))
       (should-not (map-elt ytm-radio--player :ipc-process)))))
 
 (ert-deftest ytm-radio-mpv-sentinel-retries-cache-before-ipc ()
@@ -687,9 +688,10 @@ FIELDS are included on both the top-level mutation output and source."
     (cl-letf (((symbol-function 'process-live-p) (lambda (_process) nil))
               ((symbol-function 'process-exit-status) (lambda (_process) 2))
               ((symbol-function 'ytm-radio--stop-process)
-               (lambda () (setq stopped t)))
+               (lambda (&optional _preserve-retry-stage) (setq stopped t)))
               ((symbol-function 'ytm-radio--play-track)
-               (lambda (track) (setq retried-track track)))
+               (lambda (track &optional _preserve-retry-stage)
+                 (setq retried-track track)))
               ((symbol-function 'message) #'ignore))
       (ytm-radio--mpv-sentinel 'mpv-process "exited")
       (should stopped)
@@ -714,11 +716,12 @@ FIELDS are included on both the top-level mutation output and source."
     (cl-letf (((symbol-function 'process-live-p) (lambda (_process) nil))
               ((symbol-function 'process-exit-status) (lambda (_process) 2))
               ((symbol-function 'ytm-radio--play-track)
-               (lambda (track) (setq retried-track track)))
+               (lambda (track &optional _preserve-retry-stage)
+                 (setq retried-track track)))
               ((symbol-function 'message) #'ignore))
       (ytm-radio--mpv-sentinel 'mpv-process "exited")
       (should (equal retried-track track))
-      (should (map-elt ytm-radio--player :retried-playback-error)))))
+      (should (eq (map-elt ytm-radio--player :retry-stage) 'final)))))
 
 (ert-deftest ytm-radio-render-explains-empty-catalog ()
   "Render an empty catalog with next-step guidance."
@@ -1533,8 +1536,8 @@ FIELDS are included on both the top-level mutation output and source."
       (ytm-radio-import-ytmusic-liked)
       (should (equal captured '("liked" "liked songs" library))))))
 
-(ert-deftest ytm-radio-refresh-liked-section-reloads-helper-target ()
-  "Refreshing a liked songs section clears cached helper data and reloads it."
+(ert-deftest ytm-radio-refresh-liked-section-bypasses-helper-cache ()
+  "Refreshing a liked songs section requests fresh helper data."
   (let* ((source (ytm-radio--make-source
                   :id "ytm:library:liked"
                   :kind 'youtube-music-liked
@@ -1551,22 +1554,19 @@ FIELDS are included on both the top-level mutation output and source."
          (ytm-radio--browser-view view)
          (ytm-radio--browser-load-process nil)
          (ytm-radio--loaded t)
-         (clear-count 0)
          captured)
     (with-current-buffer (ytm-radio--buffer)
       (let ((inhibit-read-only t))
         (erase-buffer)))
-    (cl-letf (((symbol-function 'ytm-radio--clear-helper-response-cache)
-               (lambda () (cl-incf clear-count)))
-              ((symbol-function 'ytm-radio--start-helper-target-load)
-               (lambda (target label loading-view &optional restore-entry)
+    (cl-letf (((symbol-function 'ytm-radio--start-helper-target-load)
+               (lambda (target label loading-view &optional restore-entry fresh)
                  (setq captured
                        (list target label loading-view
-                             (map-elt restore-entry :view))))))
+                             (map-elt restore-entry :view)
+                             fresh)))))
       (ytm-radio-refresh)
-      (should (= clear-count 1))
       (should (equal captured
-                     (list "liked" "liked songs" view view))))))
+                     (list "liked" "liked songs" view view t))))))
 
 (ert-deftest ytm-radio-render-shows-detail-header-metadata ()
   "Render detail header sources with thumbnail metadata and subtitle."
@@ -1877,6 +1877,30 @@ FIELDS are included on both the top-level mutation output and source."
       (let ((cover (ytm-radio--source-header-cover-image source)))
         (should (equal (car cover) 'placeholder-cover))
         (should (= (nth 1 cover) (ytm-radio--detail-header-cover-size)))))))
+
+(ert-deftest ytm-radio-detail-header-cover-download-rerenders-browser ()
+  "Refresh detail headers when an uncached cover download completes."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:MPRE1:header"
+                 :kind 'youtube-music-album
+                 :title "Album"
+                 :thumbnail-url "https://example.invalid/cover.jpg"))
+        captured-callback
+        rendered)
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) t))
+              ((symbol-function 'ytm-radio--ensure-cover-file)
+               (lambda (_url callback)
+                 (setq captured-callback callback)
+                 nil))
+              ((symbol-function 'ytm-radio--svg-detail-header-placeholder-image)
+               (lambda (&rest _arguments) 'placeholder-cover))
+              ((symbol-function 'ytm-radio--render-browser)
+               (lambda (&rest _arguments) (setq rendered t))))
+      (should (ytm-radio--source-header-cover-image source))
+      (should (functionp captured-callback))
+      (funcall captured-callback "https://example.invalid/cover.jpg" "/tmp/cover.jpg")
+      (should rendered))))
 
 (ert-deftest ytm-radio-album-detail-header-renders-title-only-header ()
   "Render album headers with real titles even when metadata is missing."
@@ -2488,6 +2512,31 @@ FIELDS are included on both the top-level mutation output and source."
     (should (equal (cdr image-object) '(:type svg :data "new")))
     (should (eq forced (get-buffer ytm-radio--library-buffer-name)))))
 
+(ert-deftest ytm-radio-thumbnail-download-rerenders-unsupported-state ()
+  "Redraw when a downloaded thumbnail cannot update the placeholder in place."
+  (let* ((url "https://example.invalid/thumb.jpg")
+         (file "/tmp/thumb.jpg")
+         (ytm-radio--browser-thumbnail-state-cache
+          (make-hash-table :test #'equal))
+         (ytm-radio--browser-thumbnail-state-keys-by-url
+          (make-hash-table :test #'equal))
+         (ytm-radio--browser-thumbnail-pending-urls nil)
+         (state (ytm-radio--browser-thumbnail-state
+                 url '((image :type svg :data "old") 48 62 fixed-canvas)))
+         rendered)
+    (cl-letf (((symbol-function 'file-readable-p)
+               (lambda (path) (equal path file)))
+              ((symbol-function 'ytm-radio--thumbnail-image-from-file)
+               (lambda (_file)
+                 '((image :type jpeg) 24 18)))
+              ((symbol-function 'force-window-update)
+               (lambda (_object) (error "mutated unsupported state")))
+              ((symbol-function 'ytm-radio--render-browser)
+               (lambda (&rest _) (setq rendered t))))
+      (ytm-radio--thumbnail-download-finished url file))
+    (should state)
+    (should rendered)))
+
 (ert-deftest ytm-radio-thumbnail-downloads-respect-render-budget ()
   "Limit thumbnail downloads started during one browser render pass."
   (let ((ytm-radio--browser-thumbnail-download-budget 1)
@@ -2571,6 +2620,17 @@ FIELDS are included on both the top-level mutation output and source."
     (should (= (length calls) 2))
     (should (memq 'first calls))
     (should (memq 'second calls))
+    (should-not (ytm-radio--cover-download-in-flight-p "url"))))
+
+(ert-deftest ytm-radio-cover-download-failure-completes-callbacks ()
+  "Complete cover callbacks even when no file was downloaded."
+  (let ((ytm-radio--cover-downloads (make-hash-table :test #'equal))
+        completed-file)
+    (ytm-radio--register-cover-download-callback
+     "url" (lambda (_url file) (setq completed-file (or file 'failed))))
+    (cl-letf (((symbol-function 'file-readable-p) (lambda (_file) nil)))
+      (ytm-radio--run-cover-download-callbacks "url" "/tmp/missing.jpg"))
+    (should (eq completed-file 'failed))
     (should-not (ytm-radio--cover-download-in-flight-p "url"))))
 
 (ert-deftest ytm-radio-cache-cover-coalesces-in-flight-requests ()
@@ -2835,6 +2895,25 @@ FIELDS are included on both the top-level mutation output and source."
       (should (string-match-p (regexp-quote "Song ▼")
                               (buffer-string))))))
 
+(ert-deftest ytm-radio-now-playing-title-with-rating-fits-pixels ()
+  "Keep now-playing title plus rating marker on one graphic line."
+  (cl-letf (((symbol-function 'ytm-radio--now-playing-frame)
+             (lambda () 'child))
+            ((symbol-function 'display-graphic-p)
+             (lambda (&optional _frame) t))
+            ((symbol-function 'string-pixel-width)
+             (lambda (string &optional _buffer)
+               (cl-loop
+                for char across (substring-no-properties (or string ""))
+                sum (cond
+                     ((eq char ?\s) 4)
+                     ((eq char ?U) 18)
+                     (t 12))))))
+    (let ((text (ytm-radio--fit-title-with-rating-to-pixels
+                 "ABCDE" " U" 'bold 50)))
+      (should (string-suffix-p " U" (substring-no-properties text)))
+      (should (<= (string-pixel-width text) 50)))))
+
 (ert-deftest ytm-radio-playback-status-does-not-rerender-browser ()
   "Keep browser content stable when mpv reports play/pause status changes."
   (let ((ytm-radio--player (ytm-radio--make-player :status 'playing))
@@ -2957,6 +3036,50 @@ FIELDS are included on both the top-level mutation output and source."
         (ytm-radio--insert-now-playing-controls)
         (should (equal (get-text-property (point-min) 'display)
                        '(space :width (30))))))))
+
+(ert-deftest ytm-radio-now-playing-cover-uses-visual-padding ()
+  "Place the cover with the tuned child-frame visual padding."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'ytm-radio--now-playing-frame)
+               (lambda () 'child))
+              ((symbol-function 'frame-char-width)
+               (lambda (&optional _frame) 10))
+              ((symbol-function 'ytm-radio--now-playing-controls-text)
+               (lambda () ""))
+              ((symbol-function 'insert-image)
+               (lambda (&rest _arguments) (insert "image"))))
+      (ytm-radio--insert-cover '(image (180 . 180)))
+      (goto-char (point-min))
+      (forward-char 1)
+      (should (equal (get-text-property (point) 'display)
+                     '(space :width (7)))))))
+
+(ert-deftest ytm-radio-now-playing-fit-frame-follows-cover-width ()
+  "Size the now-playing child frame from the current cover width."
+  (let (recorded-widths recorded-pixelwise image-width)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'ytm-radio--buffer-image)
+                 (lambda (_buffer) 'image))
+                ((symbol-function 'image-size)
+                 (lambda (&rest _arguments) (cons image-width 180)))
+                ((symbol-function 'ytm-radio--now-playing-frame-height)
+                 (lambda (&rest _arguments) 240))
+                ((symbol-function 'set-frame-width)
+                 (lambda (_frame width &optional _pretend pixelwise-arg)
+                   (push width recorded-widths)
+                   (setq recorded-pixelwise pixelwise-arg)))
+                ((symbol-function 'set-frame-height)
+                 (lambda (&rest _arguments) nil))
+                ((symbol-function 'frame-char-width)
+                 (lambda (&optional _frame) 10))
+                ((symbol-function 'ytm-radio--now-playing-controls-text)
+                 (lambda () "")))
+        (setq image-width 180)
+        (ytm-radio--fit-frame 'child (current-buffer))
+        (setq image-width 160)
+        (ytm-radio--fit-frame 'child (current-buffer))))
+    (should (equal (nreverse recorded-widths) '(192 172)))
+    (should recorded-pixelwise)))
 
 (ert-deftest ytm-radio-now-playing-safe-text-width-keeps-extra-column ()
   "Use the progress-line margin plus one extra column for title text."
@@ -3115,8 +3238,7 @@ FIELDS are included on both the top-level mutation output and source."
                  :url "https://music.youtube.com/watch?v=abc123_DEF4"))
          (ytm-radio--player (ytm-radio--make-player :current-track track))
          (ytm-radio-helper-auth-file nil)
-         called-arguments
-         (clear-count 0))
+         called-arguments)
     (cl-letf (((symbol-function 'ytm-radio--with-account-auth)
                (lambda (action &optional _message)
                  (funcall action)))
@@ -3126,18 +3248,15 @@ FIELDS are included on both the top-level mutation output and source."
                  (setq called-arguments arguments)
                  (funcall success
                           '((video-id . "abc123_DEF4") (rating . "like")))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache)
-               (lambda () (cl-incf clear-count)))
               ((symbol-function 'ytm-radio--render-now-playing) #'ignore)
               ((symbol-function 'ytm-radio--render-browser) #'ignore)
               ((symbol-function 'message) #'ignore))
       (ytm-radio-like-current-track)
       (should (equal called-arguments '("rate" "abc123_DEF4" "like")))
-      (should (eq (map-elt track :like-status) 'like))
+      (should (eq (ytm-radio--track-like-status track) 'like))
       (ytm-radio-like-current-track)
       (should (equal called-arguments '("rate" "abc123_DEF4" "indifferent")))
-      (should-not (map-elt track :like-status))
-      (should (= clear-count 2)))))
+      (should-not (ytm-radio--track-like-status track)))))
 
 (ert-deftest ytm-radio-like-current-track-uses-cached-like-status ()
   "Unlike a current track whose rating is known from cached sources."
@@ -3172,16 +3291,14 @@ FIELDS are included on both the top-level mutation output and source."
                  (funcall success
                           '((video-id . "2KoWN3sAFms")
                             (rating . "indifferent")))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache)
-               #'ignore)
               ((symbol-function 'ytm-radio--render-now-playing) #'ignore)
               ((symbol-function 'ytm-radio--render-browser) #'ignore)
               ((symbol-function 'message) #'ignore))
       (ytm-radio-like-current-track)
       (should (equal called-arguments
                      '("rate" "2KoWN3sAFms" "indifferent")))
-      (should-not (map-elt track :like-status))
-      (should-not (map-elt library-track :like-status)))))
+      (should-not (ytm-radio--track-like-status track))
+      (should (eq (map-elt library-track :like-status) 'like)))))
 
 (ert-deftest ytm-radio-current-actions-labels-follow-track-state ()
   "Use action labels for current-track transient suffixes."
@@ -3205,8 +3322,8 @@ FIELDS are included on both the top-level mutation output and source."
     (should (string-equal (ytm-radio--current-track-library-action-label)
                           "Remove from library"))))
 
-(ert-deftest ytm-radio-set-track-like-status-syncs-source-items ()
-  "Propagate local rating changes to cached source tracks and raw items."
+(ert-deftest ytm-radio-set-track-like-status-indexes-source-items ()
+  "Expose local rating changes without mutating cached source payloads."
   (let* ((item '((type . "track")
                  (id . "abc123_DEF4")
                  (title . "Song")
@@ -3235,15 +3352,18 @@ FIELDS are included on both the top-level mutation output and source."
               ((symbol-function 'ytm-radio--render-browser)
                (lambda (&rest _args) (setq browser-rendered t))))
       (ytm-radio--set-track-like-status track 'like)
-      (should (eq (map-elt track :like-status) 'like))
-      (should (eq (map-elt source-track :like-status) 'like))
-      (should (equal (map-elt item 'like-status) "like"))
+      (should (eq (ytm-radio--track-like-status track) 'like))
+      (should (eq (ytm-radio--track-like-status source-track) 'like))
+      (should (eq (ytm-radio--track-like-status item) 'like))
+      (should-not (map-elt track :like-status))
+      (should-not (map-elt source-track :like-status))
+      (should-not (assq 'like-status item))
       (should now-playing-rendered)
       (should browser-rendered)
       (ytm-radio--set-track-like-status track nil)
-      (should-not (map-elt track :like-status))
-      (should-not (map-elt source-track :like-status))
-      (should-not (map-elt item 'like-status)))))
+      (should-not (ytm-radio--track-like-status track))
+      (should-not (ytm-radio--track-like-status source-track))
+      (should-not (ytm-radio--track-like-status item)))))
 
 (ert-deftest ytm-radio-refresh-track-status-applies-helper-data ()
   "Refresh current track account status through the helper without prompting."
@@ -3255,11 +3375,13 @@ FIELDS are included on both the top-level mutation output and source."
          (ytm-radio--player (ytm-radio--make-player :current-track track))
          (ytm-radio-helper-auth-file nil)
          called-arguments
+         (call-count 0)
          now-playing-rendered)
     (cl-letf (((symbol-function 'ytm-radio--track-status-refresh-available-p)
                (lambda () t))
               ((symbol-function 'ytm-radio--call-helper-async)
                (lambda (arguments success _error-callback)
+                 (cl-incf call-count)
                  (setq called-arguments arguments)
                  (funcall success '((video-id . "abc123_DEF4")
                                     (in-library . t)
@@ -3269,11 +3391,18 @@ FIELDS are included on both the top-level mutation output and source."
               ((symbol-function 'ytm-radio--render-browser) #'ignore))
       (ytm-radio--refresh-track-status track)
       (should (equal called-arguments '("track-status" "abc123_DEF4")))
-      (should (eq (map-elt track :like-status) 'like))
-      (should (map-elt track :in-library))
+      (should (eq (ytm-radio--track-like-status track) 'like))
+      (should (ytm-radio--track-library-status-p track))
       (should now-playing-rendered)
-      (should (eq (gethash "abc123_DEF4" ytm-radio--track-status-refreshes)
-                  'done)))))
+      (should (numberp (gethash "abc123_DEF4"
+                                ytm-radio--track-status-refreshes)))
+      (ytm-radio--refresh-track-status track)
+      (should (= call-count 1))
+      (puthash "abc123_DEF4"
+               (- (float-time) ytm-radio--track-status-refresh-ttl 1)
+               ytm-radio--track-status-refreshes)
+      (ytm-radio--refresh-track-status track)
+      (should (= call-count 2)))))
 
 (ert-deftest ytm-radio-apply-track-status-preserves-unknown-like-status ()
   "Preserve cached ratings when helper track status omits like-status."
@@ -3307,14 +3436,14 @@ FIELDS are included on both the top-level mutation output and source."
          (in-library . t)))
       (should (eq (ytm-radio--track-like-status track) 'like))
       (should (eq (map-elt library-track :like-status) 'like))
-      (should (map-elt track :in-library))
+      (should (ytm-radio--track-library-status-p track))
       (should now-playing-rendered)
       (ytm-radio--apply-track-status
        track
        '((video-id . "abc123_DEF4")
          (like-status . nil)))
       (should-not (ytm-radio--track-like-status track))
-      (should-not (map-elt library-track :like-status)))))
+      (should (eq (map-elt library-track :like-status) 'like)))))
 
 (ert-deftest ytm-radio-toggle-current-track-library-calls-helper ()
   "Toggle library status for the current track through the helper."
@@ -3324,8 +3453,7 @@ FIELDS are included on both the top-level mutation output and source."
                  :url "https://music.youtube.com/watch?v=abc123_DEF4"))
          (ytm-radio--player (ytm-radio--make-player :current-track track))
          (ytm-radio-helper-auth-file nil)
-         called-arguments
-         (clear-count 0))
+         called-arguments)
     (cl-letf (((symbol-function 'ytm-radio--with-account-auth)
                (lambda (action &optional _message)
                  (funcall action)))
@@ -3337,16 +3465,13 @@ FIELDS are included on both the top-level mutation output and source."
                                     (in-library . t)
                                     (like-status . "like")
                                     (changed . t)))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache)
-               (lambda () (cl-incf clear-count)))
               ((symbol-function 'ytm-radio--render-now-playing) #'ignore)
               ((symbol-function 'ytm-radio--render-browser) #'ignore)
               ((symbol-function 'message) #'ignore))
       (ytm-radio-toggle-current-track-library)
       (should (equal called-arguments '("library" "abc123_DEF4" "toggle")))
-      (should (map-elt track :in-library))
-      (should (eq (map-elt track :like-status) 'like))
-      (should (= clear-count 1)))))
+      (should (ytm-radio--track-library-status-p track))
+      (should (eq (ytm-radio--track-like-status track) 'like)))))
 
 (ert-deftest ytm-radio-toggle-detail-library-applies-refreshed-source ()
   "Toggle detail library status and replace the current detail from helper data."
@@ -3376,7 +3501,6 @@ FIELDS are included on both the top-level mutation output and source."
                           (cons (map-elt home-source :id) home-source))))
          (ytm-radio-helper-auth-file nil)
          called-arguments
-         (clear-count 0)
          rendered)
     (cl-letf (((symbol-function 'ytm-radio--with-account-auth)
                (lambda (action &optional _message)
@@ -3389,8 +3513,6 @@ FIELDS are included on both the top-level mutation output and source."
                           (ytm-radio-test--detail-helper-data
                            "VLPL1" "youtube-music-playlist" "Focus Mix"
                            '(in-library . t)))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache)
-               (lambda () (cl-incf clear-count)))
               ((symbol-function 'ytm-radio--render-browser)
                (lambda (&rest _args) (setq rendered t)))
               ((symbol-function 'message) #'ignore))
@@ -3400,8 +3522,8 @@ FIELDS are included on both the top-level mutation output and source."
                        "--params" "ggMCCAI%3D")))
       (should (map-elt (ytm-radio--source "ytm:browse:VLPL1:header")
                        :in-library))
-      (should (map-elt item 'in-library))
-      (should (= clear-count 1))
+      (should (ytm-radio--truthy-field-p item :in-library))
+      (should-not (assq 'in-library item))
       (should rendered))))
 
 (ert-deftest ytm-radio-toggle-detail-library-removes-saved-source ()
@@ -3443,7 +3565,6 @@ FIELDS are included on both the top-level mutation output and source."
                           (ytm-radio-test--detail-helper-data
                            "MPRE1" "youtube-music-album" "Album"
                            '(in-library . nil)))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache) #'ignore)
               ((symbol-function 'ytm-radio--render-browser) #'ignore)
               ((symbol-function 'message) #'ignore))
       (ytm-radio-toggle-detail-library)
@@ -3453,7 +3574,8 @@ FIELDS are included on both the top-level mutation output and source."
         (should refreshed)
         (should-not (map-elt refreshed :in-library))
         (should (map-elt refreshed :in-library-known)))
-      (should-not (map-elt item 'in-library)))))
+      (should-not (ytm-radio--truthy-field-p item :in-library))
+      (should (map-elt item 'in-library)))))
 
 (ert-deftest ytm-radio-toggle-detail-subscription-applies-refreshed-source ()
   "Toggle subscription status and replace the current detail from helper data."
@@ -3492,7 +3614,6 @@ FIELDS are included on both the top-level mutation output and source."
                           (ytm-radio-test--detail-helper-data
                            "UC1" "youtube-music-artist" "Artist Name"
                            '(subscribed . t)))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache) #'ignore)
               ((symbol-function 'ytm-radio--render-browser) #'ignore)
               ((symbol-function 'message) #'ignore))
       (ytm-radio-toggle-detail-subscription)
@@ -3500,7 +3621,8 @@ FIELDS are included on both the top-level mutation output and source."
                      '("subscription" "UC1" "subscribe")))
       (should (map-elt (ytm-radio--source "ytm:browse:UC1:header")
                        :subscribed))
-      (should (map-elt item 'subscribed)))))
+      (should (ytm-radio--truthy-field-p item :subscribed))
+      (should-not (assq 'subscribed item)))))
 
 (ert-deftest ytm-radio-toggle-detail-subscription-unsubscribes-subscribed-source ()
   "Unsubscribe an already-subscribed artist/channel detail."
@@ -3530,7 +3652,6 @@ FIELDS are included on both the top-level mutation output and source."
                           (ytm-radio-test--detail-helper-data
                            "UC1" "youtube-music-artist" "Artist Name"
                            '(subscribed . nil)))))
-              ((symbol-function 'ytm-radio--clear-helper-response-cache) #'ignore)
               ((symbol-function 'ytm-radio--render-browser) #'ignore)
               ((symbol-function 'message) #'ignore))
       (ytm-radio-toggle-detail-subscription)
@@ -3905,7 +4026,20 @@ FIELDS are included on both the top-level mutation output and source."
   (let ((system-type 'gnu/linux)
         (system-configuration "x86_64-pc-linux-gnu"))
     (should (equal (ytm-radio--helper-release-asset-name)
-                   "ytm-radio-helper-x86_64-unknown-linux-gnu"))))
+                   "ytm-radio-helper-x86_64-unknown-linux-gnu")))
+  (let ((system-type 'windows-nt)
+        (system-configuration "x86_64-pc-windows-msvc"))
+    (should (equal (ytm-radio--helper-release-asset-name)
+                   "ytm-radio-helper-x86_64-pc-windows-msvc.exe"))))
+
+(ert-deftest ytm-radio-installed-helper-command-uses-platform-name ()
+  "Use the platform-specific installed helper file name."
+  (let ((system-type 'windows-nt)
+        (ytm-radio-helper-install-directory
+         (expand-file-name "ytm-radio-helper-bin" temporary-file-directory)))
+    (should (string-suffix-p
+             "ytm-radio-helper.exe"
+             (ytm-radio--installed-helper-command)))))
 
 (ert-deftest ytm-radio-helper-command-falls-back-to-installed-helper ()
   "Use the installed helper when the default repo helper is missing."
@@ -4109,6 +4243,17 @@ FIELDS are included on both the top-level mutation output and source."
         (should (eq (ytm-radio--show-child-frame (current-buffer)) 'frame))
         (should (= visible-count 0))
         (should (= focus-count 0))))))
+
+(ert-deftest ytm-radio-now-playing-buffer-hides-tab-line ()
+  "Keep external tab-line settings out of the now-playing buffer."
+  (let ((ytm-radio--now-playing-buffer-name
+         " *ytm-radio-test-now-playing*")
+        (tab-line-format '("external tab line")))
+    (unwind-protect
+        (with-current-buffer (ytm-radio--now-playing-buffer)
+          (should (local-variable-p 'tab-line-format))
+          (should-not tab-line-format))
+      (kill-buffer ytm-radio--now-playing-buffer-name))))
 
 (ert-deftest ytm-radio-child-frame-border-uses-dedicated-face ()
   "Apply the ytm-radio child-frame border face instead of shadow."
@@ -4776,14 +4921,16 @@ FIELDS are included on both the top-level mutation output and source."
      (member "--restart-running"
              (ytm-radio--helper-login-arguments "/tmp/ytm-auth.json" t)))))
 
-(ert-deftest ytm-radio-browser-login-detects-restartable-diagnostics ()
-  "Detect helper diagnostics that can be handled by browser restart."
+(ert-deftest ytm-radio-browser-login-detects-restartable-error-code ()
+  "Detect the stable helper error code that permits browser restart."
   (should
    (ytm-radio--login-restart-needed-p
-    "Dia is already running without DevTools on 127.0.0.1:29317"))
+    '((code . "browser-restart-required")
+      (message . "Zen is already running without WebDriver BiDi"))))
   (should-not
    (ytm-radio--login-restart-needed-p
-    "login window is not authenticated yet")))
+    '((code . "helper-failure")
+      (message . "login window is not authenticated yet")))))
 
 (ert-deftest ytm-radio-account-login-uses-default-auth-file-without-prompt ()
   "Start account login with the configured auth file without prompting."
@@ -4854,7 +5001,7 @@ FIELDS are included on both the top-level mutation output and source."
       (should-not ytm-radio--login-continuation))))
 
 (ert-deftest ytm-radio-account-auth-failure-starts-login ()
-  "Treat 401 helper diagnostics as a prompt to refresh account auth."
+  "Treat structured auth errors as a prompt to refresh account auth."
   (let* ((auth-file (make-temp-file "ytm-radio-auth-"))
          (ytm-radio-helper-auth-file auth-file)
          (ytm-radio--login-process nil)
@@ -4864,33 +5011,44 @@ FIELDS are included on both the top-level mutation output and source."
           (cl-letf (((symbol-function 'ytm-radio--start-login)
                      (lambda (_output &optional _restart-running after-success)
                        (setq captured-continuation after-success))))
-            (ytm-radio--with-account-auth
-             (lambda ()
-               (user-error
-                "Account helper failed: YouTube Music returned HTTP 401 Unauthorized")))
+            (ytm-radio--handle-account-helper-error
+             '((code . "auth-required")
+               (message . "YouTube Music returned HTTP 401 Unauthorized")
+               (retryable . nil)
+               (auth-required . t))
+             #'ignore)
             (should-not (file-exists-p auth-file))
             (should (functionp captured-continuation))))
       (when (file-exists-p auth-file)
         (delete-file auth-file)))))
 
-(ert-deftest ytm-radio-clear-helper-bootstrap-cache ()
-  "Delete helper caches beside the configured auth file."
-  (let* ((directory (make-temp-file "ytm-radio-auth-" t))
-         (ytm-radio-helper-auth-file
-          (expand-file-name "auth.json" directory))
-         (cache-file (expand-file-name "bootstrap-cache.json" directory))
-         (response-cache (expand-file-name "response-cache" directory)))
-    (unwind-protect
-        (progn
-          (with-temp-file cache-file
-            (insert "{}"))
-          (make-directory response-cache)
-          (with-temp-file (expand-file-name "entry.json" response-cache)
-            (insert "{}"))
-          (ytm-radio--clear-helper-bootstrap-cache)
-          (should-not (file-exists-p cache-file))
-          (should-not (file-exists-p response-cache)))
-      (delete-directory directory t))))
+(ert-deftest ytm-radio-helper-refresh-arguments-bypass-response-cache ()
+  "Ask the helper to own cache invalidation for explicit refreshes."
+  (let ((ytm-radio-helper-auth-file "/tmp/ytm-auth.json"))
+    (should (member "--fresh"
+                    (ytm-radio--helper-browse-arguments "home" t t)))
+    (should-not (member "--fresh"
+                        (ytm-radio--helper-browse-arguments "home" t nil)))))
+
+(ert-deftest ytm-radio-helper-process-error-reads-structured-envelope ()
+  "Read stable helper error fields instead of matching diagnostic text."
+  (with-temp-buffer
+    (insert
+     (json-serialize
+      `((ok . :false)
+        (schema . ,ytm-radio--helper-schema-version)
+        (protocol . ,ytm-radio--helper-protocol-version)
+        (helper-version . ,ytm-radio--helper-version)
+        (error . ((code . "network")
+                  (message . "request failed")
+                  (retryable . t)
+                  (auth-required . :false)))
+        (warnings . []))))
+    (let ((helper-error
+           (ytm-radio--helper-process-error (current-buffer) "fallback")))
+      (should (equal (map-elt helper-error 'code) "network"))
+      (should (map-elt helper-error 'retryable))
+      (should-not (map-elt helper-error 'auth-required)))))
 
 (ert-deftest ytm-radio-helper-envelope-validates-schema ()
   "Return helper data only for the supported helper contract."
@@ -5013,17 +5171,25 @@ FIELDS are included on both the top-level mutation output and source."
                   :id "PL1"
                   :kind 'youtube-music-playlist
                   :title "Manual"))
+         (ytm-radio--account-state-index (make-hash-table :test #'equal))
+         (ytm-radio--account-state-owner nil)
+         (ytm-radio--track-status-refreshes (make-hash-table :test #'equal))
          (ytm-radio--state
           (ytm-radio--make-state
            :sources (list (cons (map-elt home :id) home)
                           (cons (map-elt search :id) search)
                           (cons (map-elt detail :id) detail)
                           (cons (map-elt manual :id) manual)))))
+    (ytm-radio--set-account-state 'subscription '("UC1") t)
+    (puthash "abc123_DEF4" (float-time) ytm-radio--track-status-refreshes)
     (ytm-radio--drop-account-helper-sources)
     (should-not (assoc "ytm:home:1:listen-again" (ytm-radio--sources)))
     (should-not (assoc "ytm:search:30" (ytm-radio--sources)))
     (should-not (assoc "ytm:browse:UC1:header" (ytm-radio--sources)))
-    (should (assoc "PL1" (ytm-radio--sources)))))
+    (should (assoc "PL1" (ytm-radio--sources)))
+    (should (eq (ytm-radio--account-state 'subscription '("UC1"))
+                ytm-radio--account-state-missing))
+    (should-not (gethash "abc123_DEF4" ytm-radio--track-status-refreshes))))
 
 (provide 'ytm-radio-test)
 

@@ -22,10 +22,20 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
+            binary: ytm-radio-helper
+            asset: ytm-radio-helper-aarch64-apple-darwin
           - os: macos-14
             target: x86_64-apple-darwin
+            binary: ytm-radio-helper
+            asset: ytm-radio-helper-x86_64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            binary: ytm-radio-helper
+            asset: ytm-radio-helper-x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: ytm-radio-helper.exe
+            asset: ytm-radio-helper-x86_64-pc-windows-msvc.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -38,12 +48,14 @@ jobs:
         run: cargo build --manifest-path helper/Cargo.toml --release --locked --target ${{ matrix.target }}
 
       - name: Prepare asset
+        shell: bash
         run: |
-          asset="ytm-radio-helper-${{ matrix.target }}"
-          cp "helper/target/${{ matrix.target }}/release/ytm-radio-helper" "$asset"
+          asset="${{ matrix.asset }}"
+          cp "helper/target/${{ matrix.target }}/release/${{ matrix.binary }}" "$asset"
           chmod 755 "$asset"
 
       - name: Upload asset
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -51,4 +63,4 @@ jobs:
           if [ -z "$tag" ]; then
             tag="${{ inputs.tag }}"
           fi
-          gh release upload "$tag" "ytm-radio-helper-${{ matrix.target }}" --clobber
+          gh release upload "$tag" "${{ matrix.asset }}" --clobber
