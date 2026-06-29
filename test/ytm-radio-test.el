@@ -2965,6 +2965,59 @@ FIELDS are included on both the top-level mutation output and source."
       (search-forward "||")
       (should (button-at (1- (point)))))))
 
+(defun ytm-radio-test--render-side-window-lines (width height)
+  "Render side-window now-playing for WIDTH and HEIGHT, returning text lines."
+  (let ((track (ytm-radio--make-track
+                :id "v1"
+                :title "Song"
+                :url "https://music.youtube.com/watch?v=v1"
+                :artist "Artist"
+                :duration 185))
+        (ytm-radio-side-window-height height)
+        (ytm-radio--player
+         (ytm-radio--make-player :status 'playing
+                                 :position 42
+                                 :duration 185)))
+    (setf (map-elt ytm-radio--player :current-track) track)
+    (with-current-buffer (ytm-radio--now-playing-buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) nil))
+              ((symbol-function 'ytm-radio--mdicon)
+               (lambda (_name fallback) fallback))
+              ((symbol-function 'ytm-radio--side-window-content-width)
+               (lambda () width)))
+      (ytm-radio--render-side-window))
+    (with-current-buffer "*ytm-radio-now-playing*"
+      (mapcar #'string-trim-right
+              (butlast (split-string
+                        (buffer-substring-no-properties (point-min)
+                                                        (point-max))
+                        "\n"))))))
+
+(ert-deftest ytm-radio-side-window-layout-is-single-line ()
+  "Render side-window content on the first row only."
+  (let ((lines (ytm-radio-test--render-side-window-lines 120 3)))
+    (should (= (length lines) 3))
+    (should (string-match-p "Song" (nth 0 lines)))
+    (should (string-match-p "Artist" (nth 0 lines)))
+    (should (string-match-p "0:42" (nth 0 lines)))
+    (should (string-match-p (regexp-quote "||") (nth 0 lines)))
+    (should (string-empty-p (nth 1 lines)))
+    (should (string-empty-p (nth 2 lines)))))
+
+(ert-deftest ytm-radio-side-window-layout-hides-controls-when-narrow ()
+  "Hide side-window controls instead of wrapping when the frame is narrow."
+  (let ((lines (ytm-radio-test--render-side-window-lines 40 3)))
+    (should (= (length lines) 3))
+    (should (string-match-p "Song" (nth 0 lines)))
+    (should (string-match-p "0:42" (nth 0 lines)))
+    (should (string-match-p "▰" (nth 0 lines)))
+    (should-not (string-match-p (regexp-quote "||") (nth 0 lines)))
+    (should (string-empty-p (nth 1 lines)))
+    (should (string-empty-p (nth 2 lines)))))
+
 (ert-deftest ytm-radio-side-window-style-uses-top-dedicated-window ()
   "Show the side-window display style in a top dedicated side window."
   (let ((ytm-radio-display-style 'side-window)
@@ -3108,6 +3161,41 @@ FIELDS are included on both the top-level mutation output and source."
                   #'ignore))
       (forward-line 1)
       (should (eq (button-get (button-at (point)) 'action) #'ignore)))))
+
+(ert-deftest ytm-radio-side-window-preserves-progress-filled-face ()
+  "Keep the side-window progress fill face distinct from shadow text."
+  (let ((track (ytm-radio--make-track
+                :id "v1"
+                :title "Song"
+                :url "https://music.youtube.com/watch?v=v1"
+                :artist "Artist"
+                :duration 208))
+        (ytm-radio-side-window-height 1)
+        (ytm-radio--player
+         (ytm-radio--make-player :status 'playing
+                                 :position 53
+                                 :duration 208)))
+    (setf (map-elt ytm-radio--player :current-track) track)
+    (with-current-buffer (ytm-radio--now-playing-buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) nil))
+              ((symbol-function 'ytm-radio--mdicon)
+               (lambda (_name fallback) fallback)))
+      (ytm-radio--render-side-window))
+    (with-current-buffer "*ytm-radio-now-playing*"
+      (goto-char (point-min))
+      (search-forward "0:53")
+      (let ((face (get-text-property (match-beginning 0) 'face)))
+        (should-not (if (listp face)
+                        (memq 'shadow face)
+                      (eq face 'shadow))))
+      (search-forward "▰")
+      (let ((face (get-text-property (1- (point)) 'face)))
+        (should (if (listp face)
+                    (memq 'ytm-radio-progress-filled face)
+                  (eq face 'ytm-radio-progress-filled)))))))
 
 (ert-deftest ytm-radio-child-frame-supported-p-detects-tty-feature ()
   "Use TTY child frames only when Emacs reports support for them."
@@ -3335,11 +3423,19 @@ FIELDS are included on both the top-level mutation output and source."
                (lambda () ""))
               ((symbol-function 'insert-image)
                (lambda (&rest _arguments) (insert "image"))))
-      (ytm-radio--insert-cover '(image (180 . 180)))
+      (should (ytm-radio--insert-cover '(image (180 . 180))))
       (goto-char (point-min))
       (forward-char 1)
       (should (equal (get-text-property (point) 'display)
                      '(space :width (7)))))))
+
+(ert-deftest ytm-radio-terminal-now-playing-cover-omits-placeholder ()
+  "Do not show a textual cover placeholder in terminal child-frame rendering."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) nil)))
+      (should-not (ytm-radio--insert-cover nil))
+      (should (string-empty-p (buffer-string))))))
 
 (ert-deftest ytm-radio-now-playing-fit-frame-follows-cover-width ()
   "Size the now-playing child frame from the current cover width."
@@ -3383,52 +3479,83 @@ FIELDS are included on both the top-level mutation output and source."
     (should (= (string-width (ytm-radio--marquee-text title 5 7)) 5))
     (should (equal (ytm-radio--marquee-text "short" 8 3) "short"))))
 
-(ert-deftest ytm-radio-render-now-playing-gaps-cover-and-title ()
-  "Insert thin padding between the cover and title."
+(defun ytm-radio-test--render-now-playing-with-cover ()
+  "Render now-playing with a deterministic cover image placeholder."
   (let ((track (ytm-radio--make-track
                 :id "v1"
                 :title "Song"
                 :url "https://music.youtube.com/watch?v=v1"))
+        (ytm-radio-display-style 'buffer)
         (ytm-radio--player (ytm-radio--make-player)))
     (setf (map-elt ytm-radio--player :current-track) track)
     (with-current-buffer (ytm-radio--now-playing-buffer)
       (let ((inhibit-read-only t))
         (erase-buffer)))
     (cl-letf (((symbol-function 'ytm-radio--cover-spec)
+               (lambda (_track) '(image (180 . 180))))
+              ((symbol-function 'ytm-radio--now-playing-frame)
+               (lambda () 'child))
+              ((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) nil))
+              ((symbol-function 'frame-char-width)
+               (lambda (&optional _frame) 10))
+              ((symbol-function 'ytm-radio--now-playing-controls-text)
+               (lambda () ""))
+              ((symbol-function 'insert-image)
+               (lambda (&rest _arguments) (insert "image")))
+              ((symbol-function 'ytm-radio--now-playing-visible-p)
+               (lambda () nil)))
+      (ytm-radio--render-now-playing))))
+
+(ert-deftest ytm-radio-render-now-playing-gaps-cover-and-title ()
+  "Insert thin padding between the cover and title."
+  (ytm-radio-test--render-now-playing-with-cover)
+  (with-current-buffer "*ytm-radio-now-playing*"
+    (goto-char (point-min))
+    (search-forward "image\n")
+    (should (equal (get-text-property (point) 'display)
+                   '((height 0.25))))))
+
+(ert-deftest ytm-radio-render-now-playing-omits-terminal-cover-placeholder ()
+  "Render terminal child-frame content without a fake cover marker."
+  (let ((track (ytm-radio--make-track
+                :id "v1"
+                :title "Song"
+                :url "https://music.youtube.com/watch?v=v1"))
+        (ytm-radio--player (ytm-radio--make-player))
+        (ytm-radio-display-style 'child-frame))
+    (setf (map-elt ytm-radio--player :current-track) track)
+    (with-current-buffer (ytm-radio--now-playing-buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (cl-letf (((symbol-function 'ytm-radio--cover-spec)
                (lambda (_track) nil))
+              ((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) nil))
+              ((symbol-function 'featurep)
+               (lambda (feature &optional _subfeature)
+                 (eq feature 'tty-child-frames)))
               ((symbol-function 'ytm-radio--now-playing-visible-p)
                (lambda () nil)))
       (ytm-radio--render-now-playing))
     (with-current-buffer "*ytm-radio-now-playing*"
       (goto-char (point-min))
-      (search-forward "[cover]\n")
-      (should (equal (get-text-property (point) 'display)
-                     '((height 0.25)))))))
+      (should-not (looking-at-p "\\+[-]+\\+"))
+      (should (string-match-p "Song" (buffer-string)))
+      (should-not (string-match-p (regexp-quote "[cover]")
+                                  (buffer-string))))))
 
 (ert-deftest ytm-radio-render-now-playing-uses-larger-edge-padding ()
   "Give now-playing top and bottom edges a little more padding."
-  (let ((track (ytm-radio--make-track
-                :id "v1"
-                :title "Song"
-                :url "https://music.youtube.com/watch?v=v1"))
-        (ytm-radio--player (ytm-radio--make-player)))
-    (setf (map-elt ytm-radio--player :current-track) track)
-    (with-current-buffer (ytm-radio--now-playing-buffer)
-      (let ((inhibit-read-only t))
-        (erase-buffer)))
-    (cl-letf (((symbol-function 'ytm-radio--cover-spec)
-               (lambda (_track) nil))
-              ((symbol-function 'ytm-radio--now-playing-visible-p)
-               (lambda () nil)))
-      (ytm-radio--render-now-playing))
-    (with-current-buffer "*ytm-radio-now-playing*"
-      (goto-char (point-min))
-      (should (equal (get-text-property (point) 'display)
-                     '((height 0.5))))
-      (goto-char (point-max))
-      (forward-line -1)
-      (should (equal (get-text-property (point) 'display)
-                     '((height 0.5)))))))
+  (ytm-radio-test--render-now-playing-with-cover)
+  (with-current-buffer "*ytm-radio-now-playing*"
+    (goto-char (point-min))
+    (should (equal (get-text-property (point) 'display)
+                   '((height 0.5))))
+    (goto-char (point-max))
+    (forward-line -1)
+    (should (equal (get-text-property (point) 'display)
+                   '((height 0.5))))))
 
 (ert-deftest ytm-radio-now-playing-frame-height-uses-measured-content ()
   "Do not add implicit bottom padding to the measured child-frame height."
@@ -3478,6 +3605,44 @@ FIELDS are included on both the top-level mutation output and source."
               #'ytm-radio-toggle-current-track-library))
   (should (eq (lookup-key ytm-radio--now-playing-mode-map (kbd "Q"))
               #'ytm-radio-queue)))
+
+(ert-deftest ytm-radio-ui-modes-truncate-lines ()
+  "Disable visual wrapping in ytm-radio UI buffers."
+  (with-temp-buffer
+    (setq-local truncate-lines nil)
+    (setq-local word-wrap t)
+    (ytm-radio--mode)
+    (should truncate-lines)
+    (should-not word-wrap))
+  (with-temp-buffer
+    (setq-local truncate-lines nil)
+    (setq-local word-wrap t)
+    (ytm-radio--now-playing-mode)
+    (should truncate-lines)
+    (should-not word-wrap)))
+
+(ert-deftest ytm-radio-ui-buffer-access-reapplies-truncation ()
+  "Keep ytm-radio UI buffers non-wrapping after later local changes."
+  (let ((ytm-radio--library-buffer-name " *ytm-radio-test-browser*")
+        (ytm-radio--now-playing-buffer-name " *ytm-radio-test-now-playing*"))
+    (unwind-protect
+        (progn
+          (with-current-buffer (ytm-radio--buffer)
+            (setq-local truncate-lines nil)
+            (setq-local word-wrap t))
+          (with-current-buffer (ytm-radio--buffer)
+            (should truncate-lines)
+            (should-not word-wrap))
+          (with-current-buffer (ytm-radio--now-playing-buffer)
+            (setq-local truncate-lines nil)
+            (setq-local word-wrap t))
+          (with-current-buffer (ytm-radio--now-playing-buffer)
+            (should truncate-lines)
+            (should-not word-wrap)))
+      (when (get-buffer ytm-radio--library-buffer-name)
+        (kill-buffer ytm-radio--library-buffer-name))
+      (when (get-buffer ytm-radio--now-playing-buffer-name)
+        (kill-buffer ytm-radio--now-playing-buffer-name)))))
 
 (ert-deftest ytm-radio-repeat-and-shuffle-commands-update-player ()
   "Toggle repeat and shuffle playback modes."

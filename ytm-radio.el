@@ -289,7 +289,7 @@ The `side-window' style installs a compact top side window on the frame."
           (const :tag "Regular buffer" buffer))
   :group 'ytm-radio)
 
-(defcustom ytm-radio-side-window-height 2
+(defcustom ytm-radio-side-window-height 1
   "Height in lines of the side-window now-playing view."
   :type '(restricted-sexp
           :match-alternatives
@@ -306,7 +306,7 @@ The `side-window' style installs a compact top side window on the frame."
   :group 'ytm-radio)
 
 (defcustom ytm-radio-side-window-title-width 32
-  "Maximum title width in columns for the side-window now-playing view."
+  "Fallback title width in columns for the side-window now-playing view."
   :type '(restricted-sexp
           :match-alternatives
           ((lambda (value)
@@ -3016,8 +3016,14 @@ When AUTOMATIC is non-nil, honor single-track repeat."
     map)
   "Keymap for `ytm-radio--mode'.")
 
+(defun ytm-radio--disable-ui-line-wrapping ()
+  "Disable automatic visual line wrapping in the current UI buffer."
+  (setq-local truncate-lines t)
+  (setq-local word-wrap nil))
+
 (define-derived-mode ytm-radio--mode special-mode "ytm-radio"
   "Major mode for the ytm-radio browser buffer."
+  (ytm-radio--disable-ui-line-wrapping)
   (setq-local mode-line-format nil)
   (setq-local header-line-format
               '(:eval (ytm-radio--browser-header-line)))
@@ -3058,9 +3064,9 @@ When AUTOMATIC is non-nil, honor single-track repeat."
 
 (define-derived-mode ytm-radio--now-playing-mode special-mode "ytm-radio-now"
   "Major mode for the ytm-radio now-playing child frame."
+  (ytm-radio--disable-ui-line-wrapping)
   (setq-local mode-line-format nil)
   (setq-local cursor-type nil)
-  (setq-local truncate-lines nil)
   (setq-local overflow-newline-into-fringe t)
   (setq-local fringe-indicator-alist
               (assq-delete-all
@@ -3086,7 +3092,8 @@ When AUTOMATIC is non-nil, honor single-track repeat."
   (let ((buffer (get-buffer-create ytm-radio--library-buffer-name)))
     (with-current-buffer buffer
       (unless (derived-mode-p 'ytm-radio--mode)
-        (ytm-radio--mode)))
+        (ytm-radio--mode))
+      (ytm-radio--disable-ui-line-wrapping))
     buffer))
 
 (defun ytm-radio--now-playing-buffer ()
@@ -3095,6 +3102,7 @@ When AUTOMATIC is non-nil, honor single-track repeat."
     (with-current-buffer buffer
       (unless (derived-mode-p 'ytm-radio--now-playing-mode)
         (ytm-radio--now-playing-mode))
+      (ytm-radio--disable-ui-line-wrapping)
       (setq-local tab-line-format nil))
     buffer))
 
@@ -5602,16 +5610,21 @@ MAX-WIDTH and MAX-HEIGHT bound the returned display size."
          (format "https://i.ytimg.com/vi/%s/hqdefault.jpg" id)))))
 
 (defun ytm-radio--insert-cover (cover-spec)
-  "Insert COVER-SPEC's image or a textual placeholder."
-  (insert ytm-radio--now-playing-top-padding)
+  "Insert COVER-SPEC's image or graphical placeholder.
+Return non-nil when a cover row was inserted."
   (if-let* ((image (car-safe cover-spec))
             (cover-width (car-safe (cadr cover-spec))))
       (progn
+        (insert ytm-radio--now-playing-top-padding)
         (ytm-radio--insert-pixel-space
          (ytm-radio--now-playing-cover-left-padding cover-width))
         (insert-image image "cover")
-        (insert "\n"))
-    (ytm-radio--insert-centered-now-playing-line "[cover]")))
+        (insert "\n")
+        t)
+    (when (display-graphic-p (ytm-radio--now-playing-frame))
+      (insert ytm-radio--now-playing-top-padding)
+      (ytm-radio--insert-centered-now-playing-line "[cover]")
+      t)))
 
 (defconst ytm-radio--now-playing-control-separator "  "
   "Separator used between compact now-playing controls.")
@@ -6008,22 +6021,60 @@ When FACE is non-nil, use it for the button label."
       (propertize (ytm-radio--mdicon "nf-md-music_box" "♪")
                   'face 'ytm-radio-side-window-title)))
 
-(defun ytm-radio--side-window-track-text (track)
-  "Return TRACK title and artist text for the side-window view."
-  (let* ((title-width ytm-radio-side-window-title-width)
+(defconst ytm-radio--side-window-line-separator "    "
+  "Separator between side-window layout sections.")
+
+(defconst ytm-radio--side-window-min-track-columns 18
+  "Minimum track columns preferred before hiding side-window controls.")
+
+(defun ytm-radio--side-window-content-width ()
+  "Return available columns for side-window content."
+  (max 1
+       (1-
+        (or (and (window-live-p ytm-radio--side-window)
+                 (window-body-width ytm-radio--side-window))
+            (frame-width (selected-frame))))))
+
+(defun ytm-radio--side-window-track-text (track &optional width)
+  "Return TRACK title and artist text for the side-window view.
+When WIDTH is non-nil, fit the returned text within WIDTH columns."
+  (let* ((width (max 1 (or width ytm-radio-side-window-title-width)))
+         (artist-separator "  ")
+         (artist (map-elt track :artist))
+         (artist (and (stringp artist)
+                      (not (string-empty-p artist))
+                      artist))
+         (artist-width (and artist
+                            (min (string-width artist)
+                                 (max 8 (/ width 2)))))
+         (include-artist
+          (and artist-width
+               (>= (- width (string-width artist-separator) artist-width)
+                   8)))
+         (title-width (if include-artist
+                          (- width
+                             (string-width artist-separator)
+                             artist-width)
+                        width))
          (title (ytm-radio--scrolling-track-title-with-rating
                  track title-width 'ytm-radio-side-window-title))
-         (artist (map-elt track :artist)))
-    (concat title
-            (when (and (stringp artist)
-                       (not (string-empty-p artist)))
-              (concat
-               "  "
-               (propertize
-                (ytm-radio--truncate artist
-                                     (max 8 (/ ytm-radio-side-window-title-width
-                                               2)))
-                'face 'ytm-radio-side-window-artist))))))
+         (text (concat
+                title
+                (when include-artist
+                  (concat
+                   artist-separator
+                   (propertize (ytm-radio--truncate artist artist-width)
+                               'face 'ytm-radio-side-window-artist))))))
+    (ytm-radio--truncate text width)))
+
+(defun ytm-radio--side-window-track-line (track width)
+  "Return the side-window track line for TRACK fitting WIDTH columns."
+  (let* ((width (max 1 width))
+         (prefix (concat " " (ytm-radio--side-window-cover track) "  "))
+         (text-width (max 1 (- width (string-width prefix)))))
+    (ytm-radio--truncate
+     (concat prefix (ytm-radio--side-window-track-text track text-width))
+     width)))
 
 (defun ytm-radio--insert-side-window-controls ()
   "Insert compact playback controls for the side-window view."
@@ -6033,15 +6084,107 @@ When FACE is non-nil, use it for the button label."
              unless first do (insert separator)
              do (ytm-radio--insert-now-playing-control icon command help face))))
 
+(defun ytm-radio--side-window-progress-min-width (track)
+  "Return the minimum useful progress label width for TRACK."
+  (let* ((duration (or (map-elt ytm-radio--player :duration)
+                       (map-elt track :duration)))
+         (left-label (or (ytm-radio--format-duration
+                          (map-elt ytm-radio--player :position))
+                         "0:00"))
+         (right-label (or (ytm-radio--format-duration duration)
+                          "--:--")))
+    (+ (string-width left-label)
+       1
+       ytm-radio--progress-bar-min-width
+       1
+       (string-width right-label))))
+
+(defun ytm-radio--side-window-progress-preferred-width (track)
+  "Return the preferred progress label width for TRACK."
+  (+ (ytm-radio--side-window-progress-min-width track)
+     (- ytm-radio--progress-bar-max-width
+        ytm-radio--progress-bar-min-width)))
+
+(defun ytm-radio--side-window-progress-label (track width)
+  "Return a side-window progress label for TRACK fitting WIDTH columns."
+  (let* ((width (max 1 width))
+         (position (map-elt ytm-radio--player :position))
+         (duration (or (map-elt ytm-radio--player :duration)
+                       (map-elt track :duration)))
+         (left-label (or (ytm-radio--format-duration position) "0:00"))
+         (right-label (or (ytm-radio--format-duration duration) "--:--"))
+         (bar-width (- width
+                       (string-width left-label)
+                       (string-width right-label)
+                       2))
+         (label
+          (if (>= bar-width ytm-radio--progress-bar-min-width)
+              (ytm-radio--progress-line-text
+               left-label
+               (ytm-radio--progress-bar
+                position duration
+                (min ytm-radio--progress-bar-max-width bar-width))
+               right-label)
+            (ytm-radio--truncate
+             (format "%s/%s" left-label right-label)
+             width))))
+    label))
+
+(defun ytm-radio--insert-side-window-line (track)
+  "Insert the single side-window layout line for TRACK."
+  (let* ((width (ytm-radio--side-window-content-width))
+         (separator ytm-radio--side-window-line-separator)
+         (separator-width (string-width separator))
+         (controls-width (string-width (ytm-radio--now-playing-controls-text)))
+         (progress-preferred-width
+          (ytm-radio--side-window-progress-preferred-width track))
+         (show-controls
+          (>= width
+              (+ ytm-radio--side-window-min-track-columns
+                 progress-preferred-width
+                 controls-width
+                 (* 2 separator-width))))
+         (progress-width
+          (max 1
+               (min progress-preferred-width
+                    (- width
+                       ytm-radio--side-window-min-track-columns
+                       (if show-controls (+ controls-width (* 2 separator-width))
+                         separator-width)))))
+         (progress (ytm-radio--side-window-progress-label track progress-width))
+         (track-width
+          (max 1
+               (- width
+                  (string-width progress)
+                  separator-width
+                  (if show-controls (+ controls-width separator-width) 0)))))
+    (insert (ytm-radio--side-window-track-line track track-width))
+    (insert separator)
+    (insert progress)
+    (when show-controls
+      (insert separator)
+      (ytm-radio--insert-side-window-controls))))
+
+(defun ytm-radio--insert-side-window-empty-line ()
+  "Insert the side-window line when no track is active."
+  (insert
+   (ytm-radio--truncate
+    (concat " "
+            (propertize (ytm-radio--mdicon "nf-md-music_box" "♪")
+                        'face 'ytm-radio-side-window-title)
+            " "
+            (propertize "No track" 'face 'ytm-radio-side-window-artist))
+    (ytm-radio--side-window-content-width))))
+
 (defun ytm-radio--insert-side-window-fill ()
   "Insert a stretch glyph covering the rest of the side-window row."
   (insert (propertize " " 'display '(space :align-to right))))
 
 (defun ytm-radio--finish-side-window-lines ()
-  "Fill the configured side-window height with inert display rows."
+  "Fill the remaining configured side-window rows."
   (ytm-radio--insert-side-window-fill)
   (insert "\n")
-  (dotimes (_ (1- ytm-radio-side-window-height))
+  (dotimes (_ (max 0 (1- ytm-radio-side-window-height)))
     (ytm-radio--insert-side-window-fill)
     (insert "\n")))
 
@@ -6053,22 +6196,9 @@ When FACE is non-nil, use it for the button label."
             (track (ytm-radio--current-track)))
         (erase-buffer)
         (if track
-            (progn
-              (insert " ")
-              (insert (ytm-radio--side-window-cover track))
-              (insert "  ")
-              (insert (ytm-radio--side-window-track-text track))
-              (insert "    ")
-              (ytm-radio--insert-side-window-controls)
-              (when-let* ((time-label (ytm-radio--playback-time-label track)))
-                (insert "    ")
-                (insert (propertize time-label 'face 'shadow))))
+            (ytm-radio--insert-side-window-line track)
           (ytm-radio--reset-title-scroll)
-          (insert " "
-                  (propertize (ytm-radio--mdicon "nf-md-music_box" "♪")
-                              'face 'ytm-radio-side-window-title)
-                  " "
-                  (propertize "No track" 'face 'ytm-radio-side-window-artist)))
+          (ytm-radio--insert-side-window-empty-line))
         (ytm-radio--finish-side-window-lines)
         (ytm-radio--add-now-playing-inert-button-properties)
         (setq ytm-radio--last-rendered-progress-key
@@ -6111,8 +6241,8 @@ When FACE is non-nil, use it for the button label."
                    (cover-size (cadr cover-spec))
                    (ytm-radio--cover-render-width (car-safe cover-size))
                    (text-width (ytm-radio--now-playing-safe-text-width)))
-              (ytm-radio--insert-cover cover-spec)
-              (insert ytm-radio--now-playing-thin-padding)
+              (when (ytm-radio--insert-cover cover-spec)
+                (insert ytm-radio--now-playing-thin-padding))
               (ytm-radio--insert-centered-now-playing-line
                (ytm-radio--scrolling-track-title-with-rating
                 track

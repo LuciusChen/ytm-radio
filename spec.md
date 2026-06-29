@@ -55,6 +55,12 @@ Action labels and messages may use words such as `liked`, `disliked`, `Like`,
 and `Dislike`; this icon contract applies only to persistent row/title rating
 markers.
 
+## UI Line Wrapping
+
+Browser and now-playing buffers use non-wrapping rows. Long track, artist,
+album, playlist, detail, queue, and control rows truncate horizontally in narrow
+windows instead of visually wrapping onto continuation screen lines.
+
 ## Now-Playing Child Frame
 
 The now-playing child frame must not display a frame tab bar or buffer tab line,
@@ -64,6 +70,8 @@ The `child-frame` display style uses a graphical child frame on graphical
 displays. In terminal Emacs, it uses a TTY child frame only when
 `tty-child-frames` is available. If terminal child-frame creation fails or the
 feature is unavailable, ytm-radio must fall back to a regular now-playing buffer.
+When terminal child-frame rendering has no image support, it omits the cover
+row instead of showing a textual `[cover]` placeholder.
 
 Cover art defines the child-frame width together with narrow visual side
 padding. That padding may account for Emacs image/text edge rendering instead
@@ -78,6 +86,11 @@ guard space so a rating marker appended to the title stays on the title line.
 The `side-window` display style uses a top Emacs side window in both graphical
 and terminal frames. It must not require `display-graphic-p`; terminal rendering
 uses text/icon fallbacks for unavailable images.
+
+Side-window content renders on one row. When the row is too narrow, ytm-radio
+keeps track identity and progress visible and hides playback controls instead
+of wrapping into additional content rows. Extra configured height is inert
+padding.
 
 ## Detail Account Mutations
 

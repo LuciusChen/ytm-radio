@@ -97,7 +97,9 @@ The main `*ytm-radio*` buffer is the YouTube Music browser. It renders Home,
 Explore, Library, Search, and URL-backed pages as vertical Emacs sections with
 compact track/card rows. Home, Explore, and Library sections preserve YouTube
 Music modules such as listen-again, mixed-for-you, albums, playlists, artists,
-and liked music when the web response includes them.
+and liked music when the web response includes them. UI rows truncate instead
+of visually wrapping in narrow windows, so long titles do not disturb the list
+layout.
 Home, Explore, and Library use cached sections first and only load asynchronously
 when a view has no cached data or when explicitly refreshed. Home continuation
 pages load lazily when the visible Home buffer reaches the rendered end, and the
@@ -117,13 +119,16 @@ move it for the current now-playing session.
 In terminal Emacs, `child-frame` uses Emacs's TTY child-frame support when
 available, detected with `(featurep 'tty-child-frames)`. That support requires
 newer Emacs builds. When TTY child frames are unavailable or rejected by the
-terminal, ytm-radio falls back to a regular now-playing buffer.
+terminal, ytm-radio falls back to a regular now-playing buffer. Terminal child
+frames omit cover placeholders because cover images are unavailable there.
 
 Set `ytm-radio-display-style` to `side-window` to show now-playing as a compact
 top side window instead. The side-window style appears once per frame, reserves
 real layout space, and avoids reusing Emacs's tab bar for non-tab content. This
 style works in both graphical and terminal Emacs; terminal Emacs shows text and
-icon fallbacks instead of cover images.
+icon fallbacks instead of cover images. The content stays on one row: narrow
+frames keep the track and progress visible and hide the playback controls
+instead of wrapping.
 
 ```elisp
 (setq ytm-radio-display-style 'side-window)

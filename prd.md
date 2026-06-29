@@ -77,6 +77,8 @@ and useful.
   runtime queue that `next`, `previous`, and the queue view use consistently.
 - Current-track actions should be fast to reach through direct bindings and a
   transient menu, while each action remains callable as a normal command.
+- Browser and now-playing UI rows should truncate instead of visually wrapping
+  in narrow frames.
 - Browser refreshes should preserve point when possible and never park point at
   the end as a side effect of rendering.
 - Now-playing refreshes should not steal focus during track changes.
@@ -89,12 +91,15 @@ and useful.
 - In terminal Emacs builds with `tty-child-frames`, the child-frame display
   style should use a TTY child frame. Older or incompatible terminal sessions
   should fall back to a regular buffer instead of failing.
+- Terminal child-frame rendering should omit textual cover placeholders.
 - Mouse users should be able to drag the now-playing child frame without
   breaking keyboard-only operation or playback controls.
 - The child frame should resize deterministically from current track/player
   state and avoid speculative layout compensation.
 - The side-window now-playing style should appear once per frame instead of once
   per window, reserve layout space, and avoid unrelated tab-bar semantics.
+- The side-window now-playing layout should remain a single compact row. Narrow
+  frames should hide playback controls instead of wrapping the row.
 
 ## Technical Requirements
 
