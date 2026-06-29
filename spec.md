@@ -5,9 +5,9 @@ detailed for the PRD.
 
 ## Interface Scope
 
-ytm-radio renders Emacs-native `special-mode` buffers and the optional
-now-playing child frame. It does not render, expose, or test a standalone
-terminal TUI outside Emacs.
+ytm-radio renders Emacs-native `special-mode` buffers plus optional
+now-playing side-window and child-frame surfaces. It does not render, expose,
+or test a standalone terminal TUI outside Emacs.
 
 ## Account State Markers
 
@@ -60,6 +60,11 @@ markers.
 The now-playing child frame must not display a frame tab bar or buffer tab line,
 regardless of the user's global tab configuration.
 
+The `child-frame` display style uses a graphical child frame on graphical
+displays. In terminal Emacs, it uses a TTY child frame only when
+`tty-child-frames` is available. If terminal child-frame creation fails or the
+feature is unavailable, ytm-radio must fall back to a regular now-playing buffer.
+
 Cover art defines the child-frame width together with narrow visual side
 padding. That padding may account for Emacs image/text edge rendering instead
 of being mathematically symmetric, but it must remain small and deterministic.
@@ -67,6 +72,12 @@ of being mathematically symmetric, but it must remain small and deterministic.
 Metadata, progress, and playback controls are centered against the same
 child-frame body width. Text rows reserve the cover side padding as overflow
 guard space so a rating marker appended to the title stays on the title line.
+
+## Now-Playing Side Window
+
+The `side-window` display style uses a top Emacs side window in both graphical
+and terminal frames. It must not require `display-graphic-p`; terminal rendering
+uses text/icon fallbacks for unavailable images.
 
 ## Detail Account Mutations
 

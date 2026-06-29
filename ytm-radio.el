@@ -2704,6 +2704,16 @@ When PRESERVE-RETRY-STAGE is non-nil, continue an automatic retry."
            (frame-visible-p ytm-radio--frame))
       (get-buffer-window ytm-radio--now-playing-buffer-name t)))
 
+(defun ytm-radio--tty-child-frames-supported-p ()
+  "Return non-nil when the current TTY can display child frames."
+  (and (not (display-graphic-p))
+       (featurep 'tty-child-frames)))
+
+(defun ytm-radio--child-frame-supported-p ()
+  "Return non-nil when now-playing child frames can be used."
+  (or (display-graphic-p)
+      (ytm-radio--tty-child-frames-supported-p)))
+
 (defun ytm-radio--run-progress-render ()
   "Run a pending throttled progress refresh."
   (setq ytm-radio--progress-render-timer nil)
@@ -6143,6 +6153,18 @@ When FACE is non-nil, use it for the button label."
   "Show BUFFER in a regular Emacs window."
   (pop-to-buffer buffer))
 
+(defun ytm-radio--show-child-frame-or-buffer (buffer focus)
+  "Show BUFFER in a child frame, falling back to a regular window.
+FOCUS is passed through to `ytm-radio--show-child-frame'."
+  (if (ytm-radio--child-frame-supported-p)
+      (condition-case error
+          (ytm-radio--show-child-frame buffer focus)
+        (error
+         (message "Cannot show ytm-radio child frame; using buffer: %s"
+                  (error-message-string error))
+         (ytm-radio--show-regular-buffer buffer)))
+    (ytm-radio--show-regular-buffer buffer)))
+
 (defun ytm-radio--delete-frame ()
   "Delete the now-playing child frame, if any."
   (when (frame-live-p ytm-radio--frame)
@@ -6435,9 +6457,7 @@ FOCUS is accepted for compatibility; child frames stay non-focusable."
        (ytm-radio--show-side-window buffer))
       ('child-frame
        (ytm-radio--hide-side-window)
-       (if (display-graphic-p)
-           (ytm-radio--show-child-frame buffer focus)
-         (ytm-radio--show-regular-buffer buffer)))
+       (ytm-radio--show-child-frame-or-buffer buffer focus))
       (_
        (ytm-radio--hide-side-window)
        (ytm-radio--show-regular-buffer buffer)))))

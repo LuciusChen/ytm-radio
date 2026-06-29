@@ -17,7 +17,8 @@ and useful.
 - Users who want a guided YouTube Music login flow without copying headers or
   exposing raw cookies to Emacs state.
 - Users who prefer a compact now-playing child frame or frame-level side window
-  for artwork and transport controls while continuing to work in other buffers.
+  for artwork, metadata, and transport controls while continuing to work in
+  other buffers, including terminal Emacs users.
 
 ## Goals
 
@@ -42,7 +43,7 @@ and useful.
 
 - Do not embed the full YouTube Music web app.
 - Do not build or support a standalone terminal TUI; the product UI is Emacs
-  buffers and child frames.
+  buffers, side windows, and supported child frames.
 - Do not implement browser cookie database decryption in Rust.
 - Do not support copied request-header auth or browser-cookie database import
   as fallback login paths.
@@ -82,6 +83,12 @@ and useful.
 - The now-playing child frame should keep cover art, metadata, progress, and
   playback controls compact, visually balanced, and independent from global tab
   UI.
+- In terminal Emacs, the side-window now-playing style should remain available
+  as a normal Emacs side window, using text/icon fallbacks for unavailable
+  images.
+- In terminal Emacs builds with `tty-child-frames`, the child-frame display
+  style should use a TTY child frame. Older or incompatible terminal sessions
+  should fall back to a regular buffer instead of failing.
 - Mouse users should be able to drag the now-playing child frame without
   breaking keyboard-only operation or playback controls.
 - The child frame should resize deterministically from current track/player

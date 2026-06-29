@@ -6,8 +6,9 @@ An experimental Emacs audio player for YouTube and YouTube Music.
 audio with video disabled. Emacs owns playback state, selection commands, and
 the YouTube Music browser UI.
 
-The UI is Emacs-native: regular `special-mode` buffers plus an optional
-child-frame now-playing view. ytm-radio does not provide or target a standalone
+The UI is Emacs-native: regular `special-mode` buffers plus optional
+side-window and child-frame now-playing views. Terminal Emacs is supported
+through those Emacs surfaces; ytm-radio does not provide or target a standalone
 terminal TUI outside Emacs.
 
 YouTube Music account access is a separate Rust CLI. It is not an Emacs
@@ -25,8 +26,8 @@ Implemented:
 - play through `mpv --no-video`;
 - pause, next, previous, stop, and seek through mpv IPC;
 - show YouTube Music browse pages in a regular buffer;
-- show the current cover, playback progress, and controls in a child-frame
-  now-playing view;
+- show the current cover, playback progress, and controls in child-frame,
+  side-window, or regular-buffer now-playing views;
 - expose current-track actions through a transient menu;
 - invoke an external Rust account helper;
 - import YouTube Music auth through a browser login window and the
@@ -106,16 +107,23 @@ jank while covers are still loading. Customize
 `ytm-radio-browser-thumbnail-downloads-per-render` to change the batch size, or
 set it to nil to disable the cap.
 
-The default child frame is a compact, non-focusable now-playing surface. It fits
-itself to the current cover image, shows title, artist, time, and progress, and
-exposes the core playback controls without turning the child frame into the main
-browser. In a graphical display, click the transport buttons to control playback
-or drag any non-button area of the child frame to move it for the current
-now-playing session.
+The default child frame is a compact, non-focusable now-playing surface. In a
+graphical display it fits itself to the current cover image, shows title,
+artist, time, and progress, and exposes the core playback controls without
+turning the child frame into the main browser. Click the transport buttons to
+control playback or drag any non-button area of the graphical child frame to
+move it for the current now-playing session.
+
+In terminal Emacs, `child-frame` uses Emacs's TTY child-frame support when
+available, detected with `(featurep 'tty-child-frames)`. That support requires
+newer Emacs builds. When TTY child frames are unavailable or rejected by the
+terminal, ytm-radio falls back to a regular now-playing buffer.
 
 Set `ytm-radio-display-style` to `side-window` to show now-playing as a compact
 top side window instead. The side-window style appears once per frame, reserves
-real layout space, and avoids reusing Emacs's tab bar for non-tab content.
+real layout space, and avoids reusing Emacs's tab bar for non-tab content. This
+style works in both graphical and terminal Emacs; terminal Emacs shows text and
+icon fallbacks instead of cover images.
 
 ```elisp
 (setq ytm-radio-display-style 'side-window)
