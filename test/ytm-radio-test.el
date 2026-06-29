@@ -3764,10 +3764,20 @@ FIELDS are included on both the top-level mutation output and source."
       (should-not (ytm-radio--track-like-status track))
       (should (eq (map-elt library-track :like-status) 'like)))))
 
-(defun ytm-radio-test--should-state-label (label text face)
-  "Assert LABEL has TEXT and state token FACE."
+(defun ytm-radio-test--label-token-face (label token)
+  "Return FACE for TOKEN in LABEL."
+  (let ((position (string-match (regexp-quote token) label)))
+    (should position)
+    (get-text-property position 'face label)))
+
+(defun ytm-radio-test--should-state-label (label text active &rest inactive)
+  "Assert LABEL has TEXT and highlights ACTIVE over INACTIVE tokens."
   (should (string-equal (substring-no-properties label) text))
-  (should (eq (get-text-property 0 'face label) face)))
+  (should (eq (ytm-radio-test--label-token-face label active)
+              'transient-value))
+  (dolist (token inactive)
+    (should (eq (ytm-radio-test--label-token-face label token)
+                'shadow))))
 
 (ert-deftest ytm-radio-current-actions-labels-follow-track-state ()
   "Use action labels for current-track transient suffixes."
@@ -3777,43 +3787,47 @@ FIELDS are included on both the top-level mutation output and source."
                  :url "https://music.youtube.com/watch?v=abc123_DEF4"))
          (ytm-radio--player (ytm-radio--make-player :current-track track)))
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-like-action-label) "[ ] Like" 'shadow)
+     (ytm-radio--current-like-action-label) "Like (No|Yes)" "No" "Yes")
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-dislike-action-label) "[ ] Dislike" 'shadow)
+     (ytm-radio--current-dislike-action-label) "Dislike (No|Yes)" "No" "Yes")
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-track-library-action-label) "[ ] Library" 'shadow)
+     (ytm-radio--current-track-library-action-label) "Library (No|Yes)"
+     "No" "Yes")
     (setf (map-elt track :like-status) 'like)
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-like-action-label) "[✔] Like" 'transient-value)
+     (ytm-radio--current-like-action-label) "Like (No|Yes)" "Yes" "No")
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-dislike-action-label) "[ ] Dislike" 'shadow)
+     (ytm-radio--current-dislike-action-label) "Dislike (No|Yes)" "No" "Yes")
     (setf (map-elt track :like-status) 'dislike)
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-like-action-label) "[ ] Like" 'shadow)
+     (ytm-radio--current-like-action-label) "Like (No|Yes)" "No" "Yes")
     (ytm-radio-test--should-state-label
-     (ytm-radio--current-dislike-action-label) "[✔] Dislike" 'transient-value)
+     (ytm-radio--current-dislike-action-label) "Dislike (No|Yes)" "Yes" "No")
     (setf (map-elt track :in-library) t)
     (ytm-radio-test--should-state-label
      (ytm-radio--current-track-library-action-label)
-     "[✔] Library"
-     'transient-value)))
+     "Library (No|Yes)"
+     "Yes" "No")))
 
 (ert-deftest ytm-radio-playback-action-labels-follow-player-state ()
-  "Use state markers for playback transient suffixes."
+  "Use state choices for playback transient suffixes."
   (let ((ytm-radio--player (ytm-radio--make-player)))
     (ytm-radio-test--should-state-label
-     (ytm-radio--repeat-action-label) "[ ] Repeat" 'shadow)
+     (ytm-radio--repeat-action-label) "Repeat (Off|All|One)"
+     "Off" "All" "One")
     (ytm-radio-test--should-state-label
-     (ytm-radio--shuffle-action-label) "[ ] Shuffle" 'shadow)
+     (ytm-radio--shuffle-action-label) "Shuffle (Off|On)" "Off" "On")
     (setf (map-elt ytm-radio--player :repeat) 'all)
     (ytm-radio-test--should-state-label
-     (ytm-radio--repeat-action-label) "[A] Repeat all" 'transient-value)
+     (ytm-radio--repeat-action-label) "Repeat (Off|All|One)"
+     "All" "Off" "One")
     (setf (map-elt ytm-radio--player :repeat) 'one)
     (ytm-radio-test--should-state-label
-     (ytm-radio--repeat-action-label) "[1] Repeat one" 'transient-value)
+     (ytm-radio--repeat-action-label) "Repeat (Off|All|One)"
+     "One" "Off" "All")
     (setf (map-elt ytm-radio--player :shuffle) t)
     (ytm-radio-test--should-state-label
-     (ytm-radio--shuffle-action-label) "[✔] Shuffle" 'transient-value)))
+     (ytm-radio--shuffle-action-label) "Shuffle (Off|On)" "On" "Off")))
 
 (ert-deftest ytm-radio-set-track-like-status-indexes-source-items ()
   "Expose local rating changes without mutating cached source payloads."

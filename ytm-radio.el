@@ -7157,39 +7157,53 @@ When AFTER-SUCCESS is non-nil, call it after importing auth."
 When ACTIVE is non-nil, use the transient value face."
   (propertize label 'face (if active 'transient-value 'shadow)))
 
+(defun ytm-radio--transient-state-choice (label choices active)
+  "Return transient LABEL followed by CHOICES with ACTIVE highlighted."
+  (concat label
+          " ("
+          (string-join
+           (mapcar (lambda (choice)
+                     (ytm-radio--transient-state-token
+                      choice
+                      (equal choice active)))
+                   choices)
+           "|")
+          ")"))
+
 (defun ytm-radio--current-like-action-label ()
   "Return the current-track like action label."
-  (if (eq (ytm-radio--current-track-like-status) 'like)
-      (concat (ytm-radio--transient-state-token "[✔]" t) " Like")
-    (concat (ytm-radio--transient-state-token "[ ]" nil) " Like")))
+  (ytm-radio--transient-state-choice
+   "Like" '("No" "Yes")
+   (if (eq (ytm-radio--current-track-like-status) 'like) "Yes" "No")))
 
 (defun ytm-radio--current-dislike-action-label ()
   "Return the current-track dislike action label."
-  (if (eq (ytm-radio--current-track-like-status) 'dislike)
-      (concat (ytm-radio--transient-state-token "[✔]" t) " Dislike")
-    (concat (ytm-radio--transient-state-token "[ ]" nil) " Dislike")))
+  (ytm-radio--transient-state-choice
+   "Dislike" '("No" "Yes")
+   (if (eq (ytm-radio--current-track-like-status) 'dislike) "Yes" "No")))
 
 (defun ytm-radio--current-track-library-action-label ()
   "Return the current-track library action label."
-  (if (ytm-radio--track-library-status-p (ytm-radio--current-track))
-      (concat (ytm-radio--transient-state-token "[✔]" t) " Library")
-    (concat (ytm-radio--transient-state-token "[ ]" nil) " Library")))
+  (ytm-radio--transient-state-choice
+   "Library" '("No" "Yes")
+   (if (ytm-radio--track-library-status-p (ytm-radio--current-track))
+       "Yes"
+     "No")))
 
 (defun ytm-radio--repeat-action-label ()
   "Return the repeat action label with current state."
-  (pcase (ytm-radio--repeat-mode)
-    ('all (concat (ytm-radio--transient-state-token "[A]" t)
-                  " Repeat all"))
-    ('one (concat (ytm-radio--transient-state-token "[1]" t)
-                  " Repeat one"))
-    (_ (concat (ytm-radio--transient-state-token "[ ]" nil)
-               " Repeat"))))
+  (ytm-radio--transient-state-choice
+   "Repeat" '("Off" "All" "One")
+   (pcase (ytm-radio--repeat-mode)
+     ('all "All")
+     ('one "One")
+     (_ "Off"))))
 
 (defun ytm-radio--shuffle-action-label ()
   "Return the shuffle action label with current state."
-  (if (map-elt ytm-radio--player :shuffle)
-      (concat (ytm-radio--transient-state-token "[✔]" t) " Shuffle")
-    (concat (ytm-radio--transient-state-token "[ ]" nil) " Shuffle")))
+  (ytm-radio--transient-state-choice
+   "Shuffle" '("Off" "On")
+   (if (map-elt ytm-radio--player :shuffle) "On" "Off")))
 
 (defun ytm-radio--merge-missing-track-metadata (target source)
   "Fill missing metadata in TARGET from SOURCE and return TARGET."
