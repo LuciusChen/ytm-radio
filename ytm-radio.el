@@ -52,7 +52,7 @@
 (defconst ytm-radio--helper-protocol-version 1
   "Supported helper protocol version.")
 
-(defconst ytm-radio--helper-version "0.1.3"
+(defconst ytm-radio--helper-version "0.1.4"
   "Helper binary version expected by this Elisp package.")
 
 ;;; Customization
