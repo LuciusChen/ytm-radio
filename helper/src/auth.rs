@@ -464,7 +464,60 @@ fn login_browser_is_running(browser: &LoginBrowser) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn login_browser_is_running(browser: &LoginBrowser) -> bool {
+    windows_login_browser_process_names(browser)
+        .into_iter()
+        .any(|process_name| windows_process_is_running(&process_name))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_login_browser_process_names(browser: &LoginBrowser) -> Vec<String> {
+    let mut names = match browser.kind {
+        BrowserKind::Chrome => vec!["chrome.exe".to_string()],
+        BrowserKind::Brave => vec!["brave.exe".to_string()],
+        BrowserKind::Edge => vec!["msedge.exe".to_string()],
+        BrowserKind::Chromium => vec!["chromium.exe".to_string(), "chrome.exe".to_string()],
+        BrowserKind::Firefox => vec!["firefox.exe".to_string()],
+        BrowserKind::Zen => vec!["zen.exe".to_string()],
+        BrowserKind::Dia => vec!["dia.exe".to_string()],
+        BrowserKind::Custom(_) => Vec::new(),
+    };
+    if let Some(file_name) = browser
+        .executable
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        let process_name = if file_name.contains('.') {
+            file_name.to_string()
+        } else {
+            format!("{file_name}.exe")
+        };
+        names.push(process_name);
+    }
+    dedup_strings(names)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_is_running(process_name: &str) -> bool {
+    let output = Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH", "/FI"])
+        .arg(format!("IMAGENAME eq {process_name}"))
+        .stdin(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let needle = format!("\"{}\"", process_name.to_ascii_lowercase());
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with(&needle))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn login_browser_is_running(_browser: &LoginBrowser) -> bool {
     false
 }
@@ -923,6 +976,7 @@ fn default_login_browser() -> Result<LoginBrowser> {
     )
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn command_stdout(program: &str, arguments: &[&str]) -> Option<String> {
     let output = Command::new(program)
         .args(arguments)
@@ -937,6 +991,7 @@ fn command_stdout(program: &str, arguments: &[&str]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn supported_default_login_browser(executable: PathBuf) -> Result<LoginBrowser> {
     let Some(kind) = supported_login_browser(&executable) else {
         return Err(format!(
@@ -969,7 +1024,9 @@ fn supported_login_browser(executable: &Path) -> Option<BrowserKind> {
         Some(BrowserKind::Chrome)
     } else if path.contains("brave browser") || file == "brave-browser" || file == "brave" {
         Some(BrowserKind::Brave)
-    } else if path.contains("microsoft edge") || file == "microsoft-edge" {
+    } else if path.contains("microsoft edge")
+        || matches!(file.as_str(), "microsoft-edge" | "msedge")
+    {
         Some(BrowserKind::Edge)
     } else if path.contains("chromium") || matches!(file.as_str(), "chromium" | "chromium-browser")
     {
@@ -1147,7 +1204,7 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
             ]);
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
         candidates.extend([
             login_browser(BrowserKind::Chrome, "google-chrome"),
@@ -1162,7 +1219,123 @@ fn login_browser_candidates() -> Vec<LoginBrowser> {
             login_browser(BrowserKind::Zen, "zen-browser"),
         ]);
     }
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend(windows_login_browser_candidates());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        candidates.extend([
+            login_browser(BrowserKind::Chrome, "google-chrome"),
+            login_browser(BrowserKind::Chrome, "chrome"),
+            login_browser(BrowserKind::Brave, "brave"),
+            login_browser(BrowserKind::Edge, "msedge"),
+            login_browser(BrowserKind::Chromium, "chromium"),
+            login_browser(BrowserKind::Firefox, "firefox"),
+            login_browser(BrowserKind::Zen, "zen"),
+        ]);
+    }
     candidates
+}
+
+#[cfg(target_os = "windows")]
+fn windows_login_browser_candidates() -> Vec<LoginBrowser> {
+    let mut candidates = vec![
+        login_browser(BrowserKind::Chrome, "chrome.exe"),
+        login_browser(BrowserKind::Brave, "brave.exe"),
+        login_browser(BrowserKind::Edge, "msedge.exe"),
+        login_browser(BrowserKind::Chromium, "chromium.exe"),
+        login_browser(BrowserKind::Firefox, "firefox.exe"),
+        login_browser(BrowserKind::Zen, "zen.exe"),
+    ];
+    for root in windows_program_roots() {
+        candidates.extend([
+            login_browser_path(
+                BrowserKind::Chrome,
+                root.join("Google")
+                    .join("Chrome")
+                    .join("Application")
+                    .join("chrome.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Brave,
+                root.join("BraveSoftware")
+                    .join("Brave-Browser")
+                    .join("Application")
+                    .join("brave.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Edge,
+                root.join("Microsoft")
+                    .join("Edge")
+                    .join("Application")
+                    .join("msedge.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Firefox,
+                root.join("Mozilla Firefox").join("firefox.exe"),
+            ),
+            login_browser_path(BrowserKind::Zen, root.join("Zen Browser").join("zen.exe")),
+            login_browser_path(BrowserKind::Zen, root.join("Zen").join("zen.exe")),
+        ]);
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let root = PathBuf::from(local_app_data);
+        candidates.extend([
+            login_browser_path(
+                BrowserKind::Chrome,
+                root.join("Google")
+                    .join("Chrome")
+                    .join("Application")
+                    .join("chrome.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Brave,
+                root.join("BraveSoftware")
+                    .join("Brave-Browser")
+                    .join("Application")
+                    .join("brave.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Edge,
+                root.join("Microsoft")
+                    .join("Edge")
+                    .join("Application")
+                    .join("msedge.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Zen,
+                root.join("Programs").join("Zen Browser").join("zen.exe"),
+            ),
+            login_browser_path(
+                BrowserKind::Zen,
+                root.join("Programs").join("Zen").join("zen.exe"),
+            ),
+        ]);
+    }
+    candidates
+}
+
+#[cfg(target_os = "windows")]
+fn windows_program_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(value) = std::env::var_os(variable) {
+            roots.push(PathBuf::from(value));
+        }
+    }
+    dedup_paths(roots)
+}
+
+#[cfg(target_os = "windows")]
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut deduped = Vec::new();
+    for path in paths {
+        if !deduped.iter().any(|known| known == &path) {
+            deduped.push(path);
+        }
+    }
+    deduped
 }
 
 fn login_browser(kind: BrowserKind, executable: &str) -> LoginBrowser {
@@ -1253,7 +1426,6 @@ fn spawn_bidi_login_browser(
     port: u16,
 ) -> Result<Child> {
     let mut command = Command::new(&browser.executable);
-    command.arg("--remote-debugging-port").arg(port.to_string());
     if let Some(profile_dir) = profile_dir {
         fs::create_dir_all(profile_dir).map_err(|error| {
             format!(
@@ -1261,10 +1433,9 @@ fn spawn_bidi_login_browser(
                 profile_dir.display()
             )
         })?;
-        command.arg("--profile").arg(profile_dir).arg("--no-remote");
     }
     command
-        .arg("--new-window")
+        .args(bidi_login_browser_arguments(profile_dir, port))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1275,6 +1446,18 @@ fn spawn_bidi_login_browser(
                 browser.executable.display()
             ))
         })
+}
+
+fn bidi_login_browser_arguments(profile_dir: Option<&Path>, port: u16) -> Vec<String> {
+    let mut arguments = vec![format!("--remote-debugging-port={port}")];
+    if let Some(profile_dir) = profile_dir {
+        arguments.push("--profile".to_string());
+        arguments.push(profile_dir.display().to_string());
+        arguments.push("--no-remote".to_string());
+    }
+    arguments.push("--new-window".to_string());
+    arguments.push("about:blank".to_string());
+    arguments
 }
 
 fn wait_for_login_config(

@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -760,6 +759,7 @@ fn write_private_bytes(path: &Path, content: &[u8]) -> Result<()> {
 
 #[cfg(unix)]
 fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
+    use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let mut file = fs::OpenOptions::new()

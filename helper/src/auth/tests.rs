@@ -267,6 +267,21 @@ fn cdp_login_browser_arguments_include_proxy() {
 }
 
 #[test]
+fn bidi_login_browser_arguments_include_profile() {
+    assert_eq!(
+        bidi_login_browser_arguments(Some(Path::new("/tmp/ytm-login-profile")), 29999),
+        vec![
+            "--remote-debugging-port=29999",
+            "--profile",
+            "/tmp/ytm-login-profile",
+            "--no-remote",
+            "--new-window",
+            "about:blank"
+        ]
+    );
+}
+
+#[test]
 fn resolves_login_browser_from_explicit_path() {
     let directory = temporary_test_directory();
     fs::create_dir_all(&directory).unwrap();
@@ -330,6 +345,10 @@ fn recognizes_supported_default_browser_paths() {
     assert_eq!(
         supported_login_browser(Path::new("/usr/bin/firefox")),
         Some(BrowserKind::Firefox)
+    );
+    assert_eq!(
+        supported_login_browser(Path::new("msedge.exe")),
+        Some(BrowserKind::Edge)
     );
     assert_eq!(
         supported_login_browser(Path::new("/Applications/Zen.app/Contents/MacOS/zen")),
