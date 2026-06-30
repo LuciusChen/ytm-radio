@@ -3067,9 +3067,11 @@ When AUTOMATIC is non-nil, honor single-track repeat."
   "Keymap for `ytm-radio--mode'.")
 
 (defun ytm-radio--disable-ui-line-wrapping ()
-  "Disable automatic visual line wrapping in the current UI buffer."
+  "Disable wrapping and extra line spacing in the current UI buffer."
   (setq-local truncate-lines t)
-  (setq-local word-wrap nil))
+  (setq-local word-wrap nil)
+  ;; Positive `line-spacing' creates visible seams between sliced images.
+  (setq-local line-spacing 0))
 
 (define-derived-mode ytm-radio--mode special-mode "ytm-radio"
   "Major mode for the ytm-radio browser buffer."
