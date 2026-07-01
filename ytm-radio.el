@@ -3569,7 +3569,7 @@ The bar is measured between LEFT-LABEL and RIGHT-LABEL."
     ("album" (ytm-radio--mdicon "nf-md-album" "ALBM"))
     ("artist" (ytm-radio--mdicon "nf-md-account_music" "ARTS"))
     ("podcast" (ytm-radio--mdicon "nf-md-podcast" "POD"))
-    ("episode" (ytm-radio--mdicon "nf-md-radio" "EP"))
+    ("episode" (ytm-radio--mdicon "nf-md-podcast" "EP"))
     (_ "ITEM")))
 
 (defun ytm-radio--item-type-face (item)
