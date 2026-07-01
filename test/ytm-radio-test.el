@@ -1124,8 +1124,8 @@ FIELDS are included on both the top-level mutation output and source."
         (should (eq (get-text-property 1 'face indicator)
                     'nerd-icons-test-face))))))
 
-(ert-deftest ytm-radio-render-library-items-are-compact ()
-  "Render Library song items compactly while preserving ratings."
+(ert-deftest ytm-radio-render-library-items-use-detail-rows ()
+  "Render Library song items with detail rows while preserving ratings."
   (let* ((source (ytm-radio--make-source
                   :id "ytm:library:songs"
                   :kind 'youtube-music-library-section
@@ -1157,8 +1157,8 @@ FIELDS are included on both the top-level mutation output and source."
       (should-not (string-match-p
                    "Songs[[:space:]]+Albums[[:space:]]+Artists"
                    (buffer-string)))
-      (should-not (string-match-p "Passenger - All The Little Lights"
-                                  (buffer-string)))
+      (should (string-match-p "Passenger - All The Little Lights"
+                              (buffer-string)))
       (should (string-match-p (regexp-quote "Let Her Go ▲")
                               (buffer-string))))))
 
@@ -1855,6 +1855,13 @@ FIELDS are included on both the top-level mutation output and source."
                        (make-list 3
                                   (cons row-height row-height))))))))
 
+(ert-deftest ytm-radio-detail-header-row-height-follows-remapped-font ()
+  "Grow detail cover rows with the current buffer font."
+  (let ((ytm-radio--detail-header-row-height-padding-ratio 0.25))
+    (cl-letf (((symbol-function 'ytm-radio--buffer-default-font-height)
+               (lambda () 80)))
+      (should (= (ytm-radio--detail-header-row-height) 100)))))
+
 (ert-deftest ytm-radio-detail-header-actions-align-with-last-cover-slice ()
   "Place detail header actions on the last cover row."
   (let* ((track (ytm-radio--make-track
@@ -2213,6 +2220,28 @@ FIELDS are included on both the top-level mutation output and source."
                            (cons (map-elt content :id) content)))))
       (should (ytm-radio--headingless-detail-source-p content)))))
 
+(ert-deftest ytm-radio-detail-view-hides-empty-body-below-visible-header ()
+  "Do not render an empty generic body as a duplicate detail header."
+  (let* ((header (ytm-radio--make-source
+                  :id "ytm:browse:VLSE:header"
+                  :kind 'youtube-music-playlist
+                  :title "Episodes for Later"
+                  :subtitle "Your queued episodes"
+                  :thumbnail-url "https://example.com/episodes.png"))
+         (body (ytm-radio--make-source
+                :id "ytm:browse:VLSE"
+                :kind 'youtube-music-playlist
+                :title "Playlist"))
+         (ytm-radio--browser-view
+          '((:kind . detail)
+            (:source-ids . ("ytm:browse:VLSE:header" "ytm:browse:VLSE"))))
+         (ytm-radio--state
+          (ytm-radio--make-state
+           :sources (list (cons (map-elt header :id) header)
+                          (cons (map-elt body :id) body)))))
+    (should (ytm-radio--empty-synthetic-detail-body-p body))
+    (should (equal (ytm-radio--browser-sources) (list header)))))
+
 (ert-deftest ytm-radio-synthetic-album-header-renders-before-single-source ()
   "Render the synthesized album header before the single returned source."
   (let* ((track (ytm-radio--make-track
@@ -2480,16 +2509,55 @@ FIELDS are included on both the top-level mutation output and source."
       (should (= (ytm-radio--browser-thumbnail-row-height) 31))
       (should (= (ytm-radio--browser-thumbnail-pixel-size) 62)))))
 
-(ert-deftest ytm-radio-browser-item-line-height-scale-enlarges-thumbnail-rows ()
-  "Scale item rows while keeping thumbnail content at its base size."
+(ert-deftest ytm-radio-thumbnail-height-follows-remapped-buffer-font ()
+  "Use the displayed buffer font height without capping thumbnail growth."
   (let ((ytm-radio-browser-thumbnail-size 48)
+        (ytm-radio-browser-item-line-height-scale 1.0))
+    (cl-letf (((symbol-function 'get-buffer-window)
+               (lambda (&rest _arguments) 'browser-window))
+              ((symbol-function 'window-live-p)
+               (lambda (window) (eq window 'browser-window)))
+              ((symbol-function 'window-font-height)
+               (lambda (_window _face) 96)))
+      (should (= (ytm-radio--buffer-default-font-height) 96))
+      (should (= (ytm-radio--browser-thumbnail-row-height) 96))
+      (should (= (ytm-radio--browser-thumbnail-content-size) 192)))))
+
+(ert-deftest ytm-radio-browser-text-scale-change-renders-images-again ()
+  "Rerender the browser when buffer text scaling changes."
+  (let (rendered)
+    (with-temp-buffer
+      (ytm-radio--mode)
+      (cl-letf (((symbol-function 'ytm-radio--render-browser)
+                 (lambda (&rest _arguments) (setq rendered t))))
+        (run-hooks 'text-scale-mode-hook)))
+    (should rendered)))
+
+(ert-deftest ytm-radio-browser-item-line-height-scale-enlarges-thumbnail-rows ()
+  "Scale item rows and thumbnail content together."
+  (let ((ytm-radio-browser-thumbnail-size 48)
+        (ytm-radio-browser-thumbnail-layout 'split)
         (ytm-radio-browser-item-line-height-scale 1.25))
     (cl-letf (((symbol-function 'frame-char-height)
                (lambda (&optional _frame) 20)))
-      (should (= (ytm-radio--browser-thumbnail-content-size) 48))
-      (should (= (ytm-radio--browser-thumbnail-slot-width) 48))
+      (should (= (ytm-radio--browser-thumbnail-content-size) 60))
+      (should (= (ytm-radio--browser-thumbnail-slot-width) 60))
       (should (= (ytm-radio--browser-thumbnail-row-height) 30))
-      (should (= (ytm-radio--browser-thumbnail-pixel-size) 60)))))
+      (should (= (ytm-radio--browser-thumbnail-gap-pixels) 12))
+      (should (= (ytm-radio--browser-thumbnail-pixel-size) 72))
+      (should (= (ytm-radio--browser-thumbnail-slice-height) 36)))))
+
+(ert-deftest ytm-radio-browser-thumbnail-layout-first-line-uses-content-height ()
+  "Scale first-line thumbnail content with item row height."
+  (let ((ytm-radio-browser-thumbnail-size 48)
+        (ytm-radio-browser-thumbnail-layout 'first-line)
+        (ytm-radio-browser-item-line-height-scale 1.25))
+    (cl-letf (((symbol-function 'frame-char-height)
+               (lambda (&optional _frame) 20)))
+      (should (= (ytm-radio--browser-thumbnail-content-size) 60))
+      (should (= (ytm-radio--browser-thumbnail-row-height) 30))
+      (should (= (ytm-radio--browser-thumbnail-pixel-size) 60))
+      (should (= (ytm-radio--browser-item-end-gap-height) 0.6)))))
 
 (ert-deftest ytm-radio-browser-item-line-height-scale-keeps-row-count ()
   "Do not add blank logical rows when item row height is scaled."
@@ -2506,11 +2574,59 @@ FIELDS are included on both the top-level mutation output and source."
     (with-temp-buffer
       (cl-letf (((symbol-function 'ytm-radio--item-thumbnail-image)
                  (lambda (_item) '((image :type svg :data "thumb")
-                              60 60 fixed-canvas))))
+                              60 72 fixed-canvas))))
         (ytm-radio--insert-source-item source item 1))
       (should (= (count-lines (point-min) (point-max)) 2))
       (should (= (length (split-string (buffer-string) "\n" t)) 2))
       (should-not (string-match-p "\n\n" (buffer-string))))))
+
+(ert-deftest ytm-radio-browser-thumbnail-layout-first-line-does-not-split ()
+  "Render first-line thumbnails as full images in Library detail rows."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:library:songs"
+                 :kind 'youtube-music-library-section
+                 :title "Library Songs"))
+        (item '((type . "track")
+                (id . "v1")
+                (title . "First Line Song")
+                (url . "https://music.youtube.com/watch?v=v1")
+                (artist . "Artist")))
+        (ytm-radio-browser-thumbnail-size 48)
+        (ytm-radio-browser-item-line-height-scale 1.25)
+        (ytm-radio-browser-thumbnail-layout 'first-line))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'display-graphic-p)
+                 (lambda (&optional _frame) t))
+                ((symbol-function 'frame-char-height)
+                 (lambda (&optional _frame) 20))
+                ((symbol-function 'string-pixel-width)
+                 (lambda (string &optional _buffer)
+                   (* 10 (string-width string))))
+                ((symbol-function 'ytm-radio--item-thumbnail-image)
+                 (lambda (_item) '((image :type svg :data "thumb")
+                              60 60 fixed-canvas))))
+        (ytm-radio--insert-source-item source item 1))
+      (let ((newline (save-excursion
+                       (goto-char (point-min))
+                       (search-forward "\n")
+                       (1- (point))))
+            (position (point-min))
+            split-display
+            end-display)
+        (should-not (get-text-property newline 'line-height))
+        (while (< position (point-max))
+          (let ((display (get-text-property position 'display)))
+            (when (eq (car-safe (car-safe display)) 'slice)
+              (setq split-display display)))
+          (setq position
+                (or (next-single-property-change
+                     position 'display nil (point-max))
+                    (point-max))))
+        (should-not split-display)
+        (setq end-display (get-text-property (1- (point-max)) 'display))
+        (should (eq (car-safe (car-safe end-display)) 'height))
+        (should (> (or (cadr (car-safe end-display)) 0) 0))
+        (should (= (length (split-string (buffer-string) "\n" t)) 2))))))
 
 (ert-deftest ytm-radio-placeholder-thumbnail-renders-without-url ()
   "Render a fixed-canvas placeholder when an item has no thumbnail URL."
@@ -2854,11 +2970,50 @@ FIELDS are included on both the top-level mutation output and source."
                        :kind 'youtube-music-home-section
                        :title "Items"
                        :tracks nil
-                       :items '(((type . "album") (title . "Album"))))))
+                       :items '(((type . "album") (title . "Album")))))
+         (container-source (ytm-radio--sanitize-source
+                            (ytm-radio--make-source
+                             :id "ytm:library:playlists"
+                             :kind 'youtube-music-library-section
+                             :title "Library Playlists"
+                             :tracks (list track-a)
+                             :items '(((type . "episode")
+                                       (title . "Episodes for Later")
+                                       (browse-id . "VLSE")
+                                       (playlist-id . "SE")))))))
     (should (equal (ytm-radio--source-summary track-source) "2 tracks"))
     (should (equal (ytm-radio--source-summary mixed-source)
                    "2 items / 1 track"))
-    (should (equal (ytm-radio--source-summary item-source) "1 item"))))
+    (should (equal (ytm-radio--source-summary item-source) "1 item"))
+    (should (equal (ytm-radio--source-items container-source)
+                   '(((type . "playlist")
+                      (title . "Episodes for Later")
+                      (browse-id . "VLSE")
+                      (playlist-id . "SE")))))
+    (should (equal (ytm-radio--source-summary container-source) "1 item"))))
+
+(ert-deftest ytm-radio-sanitize-library-container-items-reclassifies-stale-types ()
+  "Correct stale Library container item types from persisted state."
+  (let* ((source (ytm-radio--sanitize-source
+                  (ytm-radio--make-source
+                   :id "ytm:library:albums"
+                   :kind 'youtube-music-library-section
+                   :title "Library Albums"
+                   :items '(((type . "playlist")
+                             (title . "Album")
+                             (browse-id . "MPRE1")
+                             (playlist-id . "OLAK5uy_1"))
+                            ((type . "playlist")
+                             (title . "Artist")
+                             (browse-id . "UC123")
+                             (playlist-id . "RDAO123"))
+                            ((type . "episode")
+                             (title . "Episodes for Later")
+                             (browse-id . "VLSE")
+                             (playlist-id . "SE"))))))
+         (items (map-elt source :items)))
+    (should (equal (mapcar (lambda (item) (map-elt item 'type)) items)
+                   '("album" "artist" "playlist")))))
 
 (ert-deftest ytm-radio-more-opens-current-section-hidden-items ()
   "Open the full current section from any item row with `ytm-radio-more'."
@@ -6068,6 +6223,24 @@ STRING-PIXEL-WIDTH replaces `string-pixel-width' during rendering."
     (should (eq (map-elt track :source-kind) 'youtube-music-liked))
     (should (equal (map-elt track :title) "Song"))
     (should (equal (map-elt track :thumbnail-url) "thumb.jpg"))))
+
+(ert-deftest ytm-radio-source-from-helper-ignores-container-list-tracks ()
+  "Do not create playable tracks for Library container-list sources."
+  (let* ((helper-source
+          '((id . "ytm:library:playlists")
+            (kind . "youtube-music-library")
+            (title . "Library Playlists")
+            (items . (((type . "episode")
+                       (id . "VLSE")
+                       (title . "Episodes for Later")
+                       (browse-id . "VLSE")
+                       (playlist-id . "SE")
+                       (url . "https://music.youtube.com/playlist?list=SE"))))))
+         (source (ytm-radio--source-from-helper helper-source)))
+    (should (= (length (map-elt source :items)) 1))
+    (should (equal (map-elt (car (map-elt source :items)) 'type)
+                   "playlist"))
+    (should-not (map-elt source :tracks))))
 
 (ert-deftest ytm-radio-source-from-helper-preserves-known-false-account-state ()
   "Treat helper false account states as known values."

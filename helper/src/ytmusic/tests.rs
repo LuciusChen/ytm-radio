@@ -1336,6 +1336,49 @@ fn normalizes_library_songs_without_shuffle_all_action() {
 }
 
 #[test]
+fn browse_ids_win_over_playlist_ids_for_library_container_items() {
+    let album_response = json!({
+        "contents": [{
+            "musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Album With Playlist"}]},
+                "subtitle": {"runs": [{"text": "Album"}]},
+                "navigationEndpoint": {
+                    "browseEndpoint": {"browseId": "MPRE1"}
+                },
+                "menu": {"menuRenderer": {"playlistId": "OLAK5uy_album"}}
+            }
+        }]
+    });
+    let artist_response = json!({
+        "contents": [{
+            "musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Artist With Radio"}]},
+                "subtitle": {"runs": [{"text": "Artist"}]},
+                "navigationEndpoint": {
+                    "browseEndpoint": {"browseId": "UCARTIST"}
+                },
+                "menu": {"menuRenderer": {"playlistId": "RDAOartist"}}
+            }
+        }]
+    });
+    let album = normalize_response(&BrowseTarget::LibraryAlbums, 10, &album_response);
+    let artist = normalize_response(&BrowseTarget::LibraryArtists, 10, &artist_response);
+
+    assert_eq!(
+        album
+            .pointer("/sources/0/items/0/type")
+            .and_then(Value::as_str),
+        Some("album")
+    );
+    assert_eq!(
+        artist
+            .pointer("/sources/0/items/0/type")
+            .and_then(Value::as_str),
+        Some("artist")
+    );
+}
+
+#[test]
 fn normalizes_library_playlists_without_new_playlist_action() {
     let response = json!({
         "contents": [{
@@ -1363,6 +1406,30 @@ fn normalizes_library_playlists_without_new_playlist_action() {
                     }
                 }
             }
+        }, {
+            "musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Episodes for Later"}]},
+                "subtitle": {"runs": [
+                    {"text": "Auto playlist"},
+                    {"text": " • "},
+                    {"text": "Episodes"}
+                ]},
+                "navigationEndpoint": {
+                    "browseEndpoint": {
+                        "browseId": "FEepisodes_for_later",
+                        "browseEndpointContextSupportedConfigs": {
+                            "browseEndpointContextMusicConfig": {
+                                "pageType": "MUSIC_PAGE_TYPE_PLAYLIST"
+                            }
+                        }
+                    }
+                },
+                "thumbnailRenderer": {
+                    "musicThumbnailRenderer": {
+                        "thumbnail": {"thumbnails": [{"url": "episodes-cover"}]}
+                    }
+                }
+            }
         }]
     });
     let normalized = normalize_response(&BrowseTarget::LibraryPlaylists, 10, &response);
@@ -1370,10 +1437,18 @@ fn normalizes_library_playlists_without_new_playlist_action() {
         .pointer("/sources/0/items")
         .and_then(Value::as_array)
         .expect("items");
-    assert_eq!(items.len(), 1);
+    assert_eq!(items.len(), 2);
     assert_eq!(items[0].get("title").and_then(Value::as_str), Some("Fav"));
     assert_eq!(
         items[0].get("type").and_then(Value::as_str),
+        Some("playlist")
+    );
+    assert_eq!(
+        items[1].get("title").and_then(Value::as_str),
+        Some("Episodes for Later")
+    );
+    assert_eq!(
+        items[1].get("type").and_then(Value::as_str),
         Some("playlist")
     );
 }

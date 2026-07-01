@@ -111,7 +111,13 @@ pages load lazily when the visible Home buffer reaches the rendered end, and the
 next Home continuation token is stored with the durable browser state.
 Browser rows keep a small amount of visual breathing room without inserting
 blank lines. Customize `ytm-radio-browser-item-line-height-scale` to make rows
-tighter or looser.
+tighter or looser; thumbnail content follows the scaled row height. If split
+thumbnails show row gaps in your Emacs build, set
+`ytm-radio-browser-thumbnail-layout` to `first-line` to render covers only on
+the title row while keeping detail text aligned below; the same line-height
+scale then adds visual space between item blocks. Library uses the same item row
+layout as Home and Explore. Buffer-local text scaling also resizes browser
+thumbnails and detail covers to match the displayed font.
 Thumbnail downloads in large browser views are capped per render to reduce UI
 jank while covers are still loading. Customize
 `ytm-radio-browser-thumbnail-downloads-per-render` to change the batch size, or

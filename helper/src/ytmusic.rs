@@ -3258,6 +3258,9 @@ fn parse_card_shelf_header(renderer: &Value) -> Option<Value> {
     let browse_params = browse_endpoint
         .as_ref()
         .and_then(|endpoint| endpoint.params.clone());
+    let browse_page_type = browse_endpoint
+        .as_ref()
+        .and_then(|endpoint| endpoint.page_type.as_deref());
     let playlist_id = renderer
         .pointer("/navigationEndpoint/watchEndpoint/playlistId")
         .and_then(Value::as_str)
@@ -3272,7 +3275,12 @@ fn parse_card_shelf_header(renderer: &Value) -> Option<Value> {
         .clone()
         .or_else(|| playlist_id.clone())
         .unwrap_or_else(|| format!("item:{title}"));
-    let kind = item_kind(browse_id.as_deref(), playlist_id.as_deref(), &runs);
+    let kind = item_kind(
+        browse_page_type,
+        browse_id.as_deref(),
+        playlist_id.as_deref(),
+        &runs,
+    );
     let subtitle = metadata_subtitle(&title, &runs);
     let metadata = metadata_tokens(&title, &runs);
     let thumbnail_url = renderer
@@ -3502,12 +3510,20 @@ fn parse_card(renderer: &Value) -> Option<Value> {
     let browse_params = browse_endpoint
         .as_ref()
         .and_then(|endpoint| endpoint.params.clone());
+    let browse_page_type = browse_endpoint
+        .as_ref()
+        .and_then(|endpoint| endpoint.page_type.as_deref());
     let playlist_id = find_first_string_for_key(renderer, "playlistId");
     let id = browse_id
         .clone()
         .or_else(|| playlist_id.clone())
         .unwrap_or_else(|| format!("item:{title}"));
-    let kind = item_kind(browse_id.as_deref(), playlist_id.as_deref(), &runs);
+    let kind = item_kind(
+        browse_page_type,
+        browse_id.as_deref(),
+        playlist_id.as_deref(),
+        &runs,
+    );
     let subtitle = metadata_subtitle(&title, &metadata_runs);
     let metadata = metadata_tokens(&title, &metadata_runs);
     let thumbnail_url = find_best_thumbnail(renderer);
@@ -3586,25 +3602,40 @@ fn playable_item_kind(runs: &[TextRun]) -> String {
     }
 }
 
-fn item_kind(browse_id: Option<&str>, playlist_id: Option<&str>, runs: &[TextRun]) -> String {
-    if text_runs_contain(runs, "podcast") {
-        return "podcast".to_string();
-    }
-    if text_runs_contain(runs, "episode") {
-        return "episode".to_string();
-    }
-    if playlist_id.is_some() {
-        return "playlist".to_string();
+fn item_kind(
+    page_type: Option<&str>,
+    browse_id: Option<&str>,
+    playlist_id: Option<&str>,
+    runs: &[TextRun],
+) -> String {
+    if let Some(kind) = item_kind_from_page_type(page_type) {
+        return kind.to_string();
     }
     match browse_id.unwrap_or_default() {
         id if id.starts_with("MPRE") => "album",
-        id if id.starts_with("MPSP") => "podcast",
-        id if id.starts_with("MPED") => "episode",
         id if id.starts_with("UC") => "artist",
         id if id.starts_with("VL") || id.starts_with("PL") || id.starts_with("RD") => "playlist",
+        id if id.starts_with("MPSP") => "podcast",
+        id if id.starts_with("MPED") => "episode",
+        _ if playlist_id.is_some() => "playlist",
+        _ if text_runs_contain(runs, "podcast") => "podcast",
+        _ if text_runs_contain(runs, "episode") => "episode",
         _ => "item",
     }
     .to_string()
+}
+
+fn item_kind_from_page_type(page_type: Option<&str>) -> Option<&'static str> {
+    match page_type? {
+        "MUSIC_PAGE_TYPE_ALBUM" => Some("album"),
+        "MUSIC_PAGE_TYPE_ARTIST" | "MUSIC_PAGE_TYPE_USER_CHANNEL" => Some("artist"),
+        "MUSIC_PAGE_TYPE_PLAYLIST" => Some("playlist"),
+        "MUSIC_PAGE_TYPE_PODCAST_SHOW" => Some("podcast"),
+        "MUSIC_PAGE_TYPE_NON_MUSIC_AUDIO_TRACK_PAGE" | "MUSIC_PAGE_TYPE_PODCAST_EPISODE" => {
+            Some("episode")
+        }
+        _ => None,
+    }
 }
 
 fn item_url(kind: &str, browse_id: Option<&str>, playlist_id: Option<&str>) -> Option<String> {
@@ -3653,6 +3684,7 @@ fn watch_endpoint_from_navigation_endpoint(value: &Value) -> Option<WatchEndpoin
 struct BrowseEndpoint {
     browse_id: String,
     params: Option<String>,
+    page_type: Option<String>,
 }
 
 fn find_primary_browse_endpoint(renderer: &Value) -> Option<BrowseEndpoint> {
@@ -3686,7 +3718,16 @@ fn browse_endpoint_from_browse_endpoint(value: &Value) -> Option<BrowseEndpoint>
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
-    Some(BrowseEndpoint { browse_id, params })
+    let page_type = value
+        .pointer("/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    Some(BrowseEndpoint {
+        browse_id,
+        params,
+        page_type,
+    })
 }
 
 fn find_first_browse_endpoint(value: &Value) -> Option<BrowseEndpoint> {
