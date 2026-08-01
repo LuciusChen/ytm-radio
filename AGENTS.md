@@ -18,6 +18,39 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
 - Prefer stock Emacs primitives: `completing-read`, `special-mode`, text
   properties, `start-process`, `make-network-process`, standard timers, and
   standard hooks.
+- A refactor must create net value in ownership, simplicity, robustness, code
+  size, extensibility, or test quality. Moving code, renaming layers, or adding
+  wrappers without making the system easier to understand is not enough.
+- Improve the model before deduplicating syntax. Prefer simpler state, data
+  flow, control flow, and ownership over a larger abstraction hierarchy.
+- Treat stacks of one-use helpers, accessors, and pass-through wrappers as
+  design debt. Inline trivial ladders or move the whole workflow to a coherent
+  owner; do not hide the stack in a new module.
+- Prefer boring, direct control flow over clever dispatch hierarchies.
+- Remove unused private code completely. Keep compatibility shims only for a
+  documented public compatibility requirement, under the owning package's
+  private prefix, with tests and an explicit removal condition.
+- Keep functions focused, but do not split them merely to satisfy a line-count
+  target. Extract a helper when it owns a coherent calculation or side effect.
+- Name helpers after what they compute or perform, not after the caller that
+  happens to use them.
+- Separate pure calculation from I/O, process control, buffer mutation, and
+  other side effects where that makes the boundary testable.
+
+## Module Boundary Discipline
+
+- Move whole responsibilities, including their state, operations, validation,
+  and relevant rendering or formatting. A file containing only glue while the
+  original file still owns the behavior is not a completed extraction.
+- Stop an extraction when cross-file declarations, pass-through wrappers, and
+  navigation overhead exceed the ownership it clarifies.
+- Imports, declarations, adapters, and protocol types must express a real
+  boundary. Do not add declarations merely so a lower-level module can call
+  upward or reach into another dependency's internals.
+- Modularize incrementally: move the smallest coherent slice, compile it, and
+  run focused tests before moving the next slice.
+- An independently reusable library must not depend on ytm-radio state, UI, or
+  private symbols. ytm-radio may adapt the library through its public API.
 
 ## Diagnosis Discipline
 
@@ -40,6 +73,24 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
   a test or a minimal live check, confirm it fails, then change behavior.
 - Do not leave heuristic shortcuts, silent partial implementations, duplicated
   logic, or dead code introduced during diagnosis.
+- Before changing a primary entry point, default action, or action menu, write
+  down the intended resolution path and default behavior.
+- For broad refactors, inspect all affected code, tests, documentation,
+  postmortems, build rules, release paths, and relevant integrations before
+  choosing the architecture.
+- Inspect local evidence before asking questions. Ask only when uncertainty in
+  scope, compatibility, naming, ownership, or stopping criteria would materially
+  change the implementation; state the recommended answer and its tradeoff.
+- Record important wrong-layer compensation, silent fallbacks, timing hacks,
+  duplicated lookups, or swallowed internal failures as design debt without
+  silently expanding the current task.
+- Errors must surface. Do not turn internal failures into plausible defaults.
+  Suppress an error only at an explicit external or optional-display boundary
+  where absence is expected, recovery is meaningful, and the fallback is
+  documented or tested.
+- Structural display-property tests cannot prove graphical correctness. For
+  image sizing, font fallback, baselines, child frames, and redisplay behavior,
+  include a minimal live graphical reproduction when practical.
 
 ## Emacs Lisp Rules
 
@@ -48,7 +99,12 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
   happens through explicit commands or user-enabled modes.
 - Use the `ytm-radio-` prefix for public API and `ytm-radio--` for private
   helpers and private modes.
+- The external image-slice dependency uses `image-slice-` for public API and
+  `image-slice--` for private helpers. Its source and package-specific rules
+  live in the independent image-slice repository, not in this repository.
 - Never call another package's private double-dash symbols.
+- Multi-word predicate names end in `-p`. Prefix intentionally unused
+  arguments with `_`.
 - Public commands and user-facing modes need `;;;###autoload`.
 - Do not autoload internal helpers, variables, or private modes.
 - Public `defun`, `defmacro`, `defcustom`, and `defvar` forms must have
@@ -64,29 +120,86 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
 - Build render buffers from structured state, not by reparsing visible text.
 - Prefer `when-let*`, `if-let*`, `pcase`, and `pcase-let` for structured
   conditional binding and destructuring.
+- Avoid deep `let` / `if` nesting. Prefer flat, linear control flow and early
+  validation.
+- Prefer `cl-loop` for non-trivial iteration and idiomatic primitives such as
+  `vconcat` over reconstructed equivalents. Return predicate values directly.
+- Prefer `let*`, `pcase-let`, alists, plists, or table-driven mappings for
+  short-lived context. Reserve `cl-defstruct` or object-style layers for stable
+  data crossing module or lifecycle boundaries.
 - Use `user-error` for user-caused problems such as missing external programs,
   invalid configuration, or empty catalogs.
 - Use `error` for programmer bugs. Catch errors only at external process,
   optional display, or top-level helper protocol boundaries where recovery is
   meaningful.
+- Error messages state what is wrong, for example "Not connected", rather than
+  an abstract requirement such as "Must be connected". Do not wrap a standard
+  error unless the wrapper adds semantics named by its docstring.
 - Require runtime dependencies explicitly, for example `(require 'cl-lib)`.
   Do not rely on transitive loading.
 - Avoid `eval-when-compile` for dependencies needed at runtime.
+- When an intentionally lazy or cyclic boundary leaves an owner unloaded at
+  byte-compilation time, add precise `declare-function` or `defvar` declarations.
+  Do not duplicate declarations after a mandatory top-level `require`.
+- Load optional dependencies only at the point of use, document them separately
+  from required dependencies, and report a clear boundary error when a required
+  public API is missing. Do not silently downgrade to a private API.
+- Avoid `with-eval-after-load` unless registering an optional integration at a
+  clear package boundary.
 - Before using a newer Emacs API, verify when it was introduced and do not
   exceed the declared Emacs baseline without updating package metadata and docs.
 
+## Emacs UI and Workflow Rules
+
+- Register buffer-local hooks from mode bodies with LOCAL set to `t`.
+- Keep target resolution, action definitions, and action presentation separate.
+  Menus, transient UIs, keymaps, and external action packages must share the
+  same business-logic path.
+- Prefer one clear entry point and consistent behavior over overlapping wrapper
+  commands. Wrappers are acceptable only when they share resolution, action,
+  and default-action models.
+- Use one vocabulary for the same workflow across labels, help, errors, tests,
+  documentation, and helper protocol fields.
+- A preview must show the payload or state that will actually be executed,
+  saved, sent, or applied.
+- Validate before destroying user context. On local validation failure, keep
+  point, buffer, window, and input state where the user can correct the problem.
+- UI symmetry follows domain semantics. Do not copy controls, metadata, or
+  layout between nearby views unless the underlying operation matches.
+- Completion-at-point functions stay close to the Emacs protocol, return
+  quickly, compose with `:exclusive 'no` when appropriate, and avoid synchronous
+  work that can re-enter or block the UI.
+- Add completion-at-point functions buffer-locally with LOCAL set to `t`.
+
+## Image and Rendering Rules
+
+- Treat source-image coordinates, displayed image dimensions, line-box height,
+  and baseline ascent as separate quantities. Do not assume equal font height
+  implies equal rendered row geometry.
+- For pixel-addressed image slices, keep the source canvas, displayed image, and
+  slice offsets in the same one-to-one pixel coordinate space. Do not combine
+  integer slice coordinates with independently scaling font-relative dimensions.
+- Measure mixed faces, CJK, Emoji, boxes, raised text, and embedded displays with
+  Emacs's final layout engine when a live graphical window is available.
+- Adjacent slices require buffer-local `line-spacing` zero, gapless newlines,
+  and per-row ascent alignment. A one-pixel overlap is a narrow renderer
+  workaround, not a substitute for correct multirow geometry.
+- Preserve a deterministic terminal or hidden-buffer fallback, but do not claim
+  it is pixel-exact without a graphical display context.
+
 ## MELPA / Package Rules
 
-- Main package first line must be:
-  `;;; ytm-radio.el --- Short description -*- lexical-binding: t; -*-`
+- Every independently installable package entry file uses:
+  `;;; file.el --- Short description -*- lexical-binding: t; -*-`
 - The package description must not contain "for Emacs" or the package name.
   Keep it under 60 characters.
-- The main package file must include `;; Author:`, `;; URL:`, `;; Version:`,
-  and `;; Package-Requires:`.
+- Each independently installable package entry file includes `;; Author:`,
+  `;; URL:`, `;; Version:`, and `;; Package-Requires:`.
 - `Package-Requires` must list all direct dependencies with minimum versions,
   including the declared Emacs baseline.
-- Package metadata belongs in the main package file only. Split implementation
-  files must not duplicate `Package-Requires`.
+- Package metadata belongs in each package's entry file only. Split
+  implementation files must not duplicate `Package-Requires`; a genuinely
+  standalone package in the same repository is not a split implementation file.
 - Split implementation files still need formal license metadata, preferably
   `;; SPDX-License-Identifier:`.
 - Keep required MELPA checklist attribution such as `;; Assisted-by: ...` in
@@ -100,6 +213,19 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
   report.
 - When using `package-lint` on split implementation files, configure the main
   file instead of duplicating package metadata.
+
+## Structured Data and File Rules
+
+- Do not transform JSON, Lisp data, command protocols, or other structured
+  formats through brittle raw string insertion when syntax boundaries matter.
+  Prefer parser-backed, token-aware, or top-level-form-aware transformations.
+- Prioritize semantic correctness over aggressive rewriting. Do not introduce a
+  full parser or object framework when a small boundary-aware change is enough.
+- Every path that exports or persists files defines its encoding and a sensible
+  default. Test content correctness and at least one encoding-sensitive case
+  when changing that path.
+- Durable state schemas and helper protocol envelopes are versioned contracts;
+  reject unsupported versions instead of guessing.
 
 ## ytm-radio Boundaries
 
@@ -147,6 +273,18 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
   unless an existing test already covers the real dispatch path.
 - Tests must fail when the code is wrong. Avoid assertions that merely lock in
   implementation details.
+- Do not add tests for copy, punctuation, separators, icons, padding, or other
+  cosmetic presentation unless they carry a product, accessibility, action, or
+  regression contract.
+- Treat tests as part of the architecture budget. Keep tests for public
+  workflows, real invariants, and meaningful edge cases; remove redundant tests
+  that cannot distinguish broken behavior.
+- Use varied inputs, boundary cases, and distinct expected values where a
+  hard-coded implementation could otherwise satisfy the test.
+- Search existing tests for the changed public or private path before adding a
+  new test, and update affected expectations in the same change.
+- Graphical behavior needs proportionate GUI smoke verification in addition to
+  deterministic ERT; do not replace the deterministic suite with screenshots.
 - Read the changed diff before finalizing. Remove duplicated logic, dead code,
   and temporary diagnostics.
 
@@ -161,6 +299,48 @@ repository. It is adapted from `~/repos/coding-guidelines/general.md` and
   rewrap unchanged prose just to satisfy a column width.
 - When documentation is hard to read, improve structure with headings, focused
   bullets, or tables instead of source-only line wrapping.
+- For substantial README changes, make the opening explain what the project is,
+  who it serves, what problem it solves, and the next installation or Quick
+  Start action.
+- Lead with concrete user outcomes before implementation detail. Avoid vague
+  promotional claims, feature dumping, and unnecessary badges.
+- Never invent commands, capabilities, compatibility, benchmarks, metrics, or
+  trust signals. Verify them against code, manifests, tests, workflows, or
+  release records and report what remains unverified.
+- Keep documentation-only tasks documentation-only. Do not change code,
+  configuration, CI, or dependencies merely to make a documentation claim true
+  unless the user explicitly expands the task.
+
+## Version, Changelog, and Release Discipline
+
+- Keep Emacs, Rust, dependency, helper-protocol, and external-tool baselines
+  explicit. Do not raise one silently; update build metadata, release metadata,
+  user documentation, and the relevant postmortem when a newer baseline is
+  required.
+- When the project maintains release notes or a changelog, update it for
+  release-relevant features, fixes, supported integrations, configuration,
+  dependency, public API, or documented workflow changes. Internal mechanical
+  refactors and test-only changes do not require an entry.
+- Keep the next version unreleased until it is intentionally published or
+  tagged. A commit or merge is not itself a release and does not force a version
+  bump.
+- Include a Breaking Changes section only for a real user upgrade, API, or
+  configuration break; omit empty sections.
+- Treat helper release artifacts as content-addressed. If bytes change, update
+  checksums and install metadata immediately, and prefer a new version over
+  replacing an existing asset in place.
+- Release-asset changes affecting installation, startup, compatibility, or user
+  workflow update the README and, for non-obvious tradeoffs, a postmortem.
+
+## Pre-Commit Discipline
+
+- Read every changed line in the full diff before committing.
+- Compile and lint with zero warnings, then run the complete deterministic test
+  suite, not only focused tests.
+- Search for accidental private API calls, prefix violations, stale symbols,
+  duplicated implementations, and temporary diagnostics before committing.
+- If a fix is deliberately partial, document the deferred remainder and why;
+  do not leave an unmarked heuristic shortcut.
 
 ## Postmortem Conventions
 

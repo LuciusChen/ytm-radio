@@ -3,7 +3,7 @@
 ;; Author: Lucius Chen
 ;; URL: https://github.com/luciuschen/ytm-radio
 ;; Version: 0.1.10
-;; Package-Requires: ((emacs "29.1") (transient "0.3.7"))
+;; Package-Requires: ((emacs "29.1") (image-slice "0.1.0") (transient "0.3.7"))
 ;; Keywords: multimedia
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Assisted-by: OpenAI Codex
@@ -17,6 +17,7 @@
 
 (require 'button)
 (require 'cl-lib)
+(require 'image-slice)
 (require 'imenu)
 (require 'json)
 (require 'map)
@@ -26,10 +27,6 @@
 (require 'transient)
 (require 'url)
 (require 'url-parse)
-
-(defvar text-scale-mode)
-(defvar text-scale-mode-amount)
-(defvar text-scale-mode-step)
 
 (defconst ytm-radio--directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -466,9 +463,6 @@ When nil, thumbnail downloads are uncapped per render."
 (defconst ytm-radio--browser-heading-padding
   (propertize "\n" 'display '((height 0.25)))
   "Thin vertical padding used below browser headings.")
-
-(defconst ytm-radio--detail-header-cover-slice-overlap 1
-  "Pixels of overlap between adjacent detail header cover slices.")
 
 (defconst ytm-radio--detail-header-row-height-padding-ratio 0.25
   "Extra detail header row height ratio for fallback font line boxes.")
@@ -3361,24 +3355,9 @@ When AUTOMATIC is non-nil, honor single-track repeat."
   ;; Positive `line-spacing' creates visible seams between sliced images.
   (setq-local line-spacing 0))
 
-(defun ytm-radio--buffer-text-scale-factor ()
-  "Return the active default-face scale factor for the current buffer."
-  (if (and (bound-and-true-p text-scale-mode)
-           (boundp 'text-scale-mode-amount)
-           (numberp text-scale-mode-amount)
-           (boundp 'text-scale-mode-step)
-           (numberp text-scale-mode-step))
-      (expt text-scale-mode-step text-scale-mode-amount)
-    1.0))
-
 (defun ytm-radio--buffer-default-font-height ()
   "Return the current buffer's remapped default-face height in pixels."
-  (let ((window (get-buffer-window (current-buffer) t)))
-    (max 1
-         (or (and (window-live-p window)
-                  (ignore-errors (window-font-height window 'default)))
-             (ceiling (* (frame-char-height (selected-frame))
-                         (ytm-radio--buffer-text-scale-factor)))))))
+  (image-slice-default-font-height))
 
 (define-derived-mode ytm-radio--mode special-mode "ytm-radio"
   "Major mode for the ytm-radio browser buffer."
@@ -4553,7 +4532,7 @@ When FACE is non-nil, use it as the button face."
   (not (eq ytm-radio-browser-thumbnail-layout 'first-line)))
 
 (defun ytm-radio--browser-thumbnail-pixel-size ()
-  "Return the thumbnail canvas height for browser item rows."
+  "Return the displayed thumbnail block height for browser item rows."
   (if (ytm-radio--browser-thumbnail-split-layout-p)
       (+ (ytm-radio--browser-thumbnail-content-size)
          (ytm-radio--browser-thumbnail-gap-pixels))
@@ -4574,7 +4553,7 @@ When FACE is non-nil, use it as the button face."
               ytm-radio-browser-item-line-height-scale)))
 
 (defun ytm-radio--browser-thumbnail-gap-pixels ()
-  "Return scaled extra thumbnail canvas height in pixels."
+  "Return scaled extra thumbnail block height in pixels."
   (max 0 (- (ytm-radio--browser-thumbnail-content-size)
             (* 2 (ytm-radio--browser-thumbnail-base-row-height)))))
 
@@ -4583,6 +4562,19 @@ When FACE is non-nil, use it as the button face."
   (if (ytm-radio--browser-thumbnail-split-layout-p)
       (ceiling (/ (float (ytm-radio--browser-thumbnail-pixel-size)) 2))
     (ytm-radio--browser-thumbnail-row-height)))
+
+(defun ytm-radio--browser-thumbnail-source-height ()
+  "Return the fixed thumbnail source canvas height in pixels."
+  (if (ytm-radio--browser-thumbnail-split-layout-p)
+      (let ((slice-height (ytm-radio--browser-thumbnail-slice-height)))
+        (image-slice-source-height
+         (list slice-height slice-height) 1))
+    (ytm-radio--browser-thumbnail-pixel-size)))
+
+(defun ytm-radio--browser-thumbnail-canvas-content-size ()
+  "Return the square content edge that fits the thumbnail source canvas."
+  (min (ytm-radio--browser-thumbnail-content-size)
+       (ytm-radio--browser-thumbnail-source-height)))
 
 (defun ytm-radio--browser-item-end-gap-height ()
   "Return the relative visual gap after first-line browser items."
@@ -4764,25 +4756,26 @@ When ROW-HEIGHT is non-nil, use it as the row height in pixels."
                    (max 1 (or row-height
                               (ytm-radio--detail-header-row-height)))))))
 
-(defun ytm-radio--detail-header-cover-size (&optional row-height row-count)
+(defun ytm-radio--detail-header-cover-size (&optional row-layout)
   "Return detail header cover edge size in pixels.
-When ROW-HEIGHT and ROW-COUNT are non-nil, use them for the size."
-  (let* ((row-height (or row-height (ytm-radio--detail-header-row-height)))
-         (row-count (or row-count
-                        (ytm-radio--detail-header-row-count row-height))))
-    (* row-count row-height)))
+When ROW-LAYOUT is nil, build a uniform layout from the current buffer font."
+  (let* ((row-height (ytm-radio--detail-header-row-height))
+         (row-layout
+          (or row-layout
+              (make-list (ytm-radio--detail-header-row-count row-height)
+                         row-height))))
+    (image-slice-total-height row-layout)))
 
-(defun ytm-radio--svg-detail-header-cover-image
-    (file &optional row-height row-count)
+(defun ytm-radio--svg-detail-header-cover-image (file &optional row-layout)
   "Return a fixed-canvas detail header cover image for FILE.
-When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
+ROW-LAYOUT has the meaning documented by `ytm-radio--detail-header-cover-size'."
   (when (and (featurep 'svg)
              (image-type-available-p 'svg)
              (fboundp 'svg-create)
              (file-readable-p file))
     (when-let* ((mime-type (ytm-radio--image-mime-type file))
                 (dimensions (ytm-radio--image-file-dimensions file)))
-      (let* ((size (ytm-radio--detail-header-cover-size row-height row-count))
+      (let* ((size (ytm-radio--detail-header-cover-size row-layout))
              (svg (svg-create size size))
              (fit (ytm-radio--fit-rect (ceiling (car dimensions))
                                        (ceiling (cdr dimensions))
@@ -4830,8 +4823,10 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
     (when-let* ((mime-type (ytm-radio--image-mime-type file))
                 (dimensions (ytm-radio--image-file-dimensions file)))
       (let* ((slot-width (ytm-radio--browser-thumbnail-slot-width))
-             (slot-height (ytm-radio--browser-thumbnail-pixel-size))
-             (content-size (ytm-radio--browser-thumbnail-content-size))
+             (slot-height (ytm-radio--browser-thumbnail-source-height))
+             (content-size
+              (ytm-radio--browser-thumbnail-canvas-content-size))
+             (content-left (max 0 (/ (- slot-width content-size) 2)))
              (content-top (max 0 (/ (- slot-height content-size) 2)))
              (svg (svg-create slot-width slot-height))
              (fit (ytm-radio--fit-rect (ceiling (car dimensions))
@@ -4844,7 +4839,7 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
                   (svg-embed-base-uri-image
                    svg
                    (file-name-nondirectory file)
-                   :x (nth 2 fit)
+                   :x (+ content-left (nth 2 fit))
                    :y (+ content-top (nth 3 fit))
                    :width (nth 0 fit)
                    :height (nth 1 fit))
@@ -4853,7 +4848,7 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
                  file
                  mime-type
                  nil
-                 :x (nth 2 fit)
+                 :x (+ content-left (nth 2 fit))
                  :y (+ content-top (nth 3 fit))
                  :width (nth 0 fit)
                  :height (nth 1 fit)))
@@ -4890,19 +4885,21 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
              (image-type-available-p 'svg)
              (fboundp 'svg-create))
     (let* ((slot-width (ytm-radio--browser-thumbnail-slot-width))
-           (slot-height (ytm-radio--browser-thumbnail-pixel-size))
-           (content-size (ytm-radio--browser-thumbnail-content-size))
+           (slot-height (ytm-radio--browser-thumbnail-source-height))
+           (content-size
+            (ytm-radio--browser-thumbnail-canvas-content-size))
+           (content-left (max 0 (/ (- slot-width content-size) 2)))
            (content-top (max 0 (/ (- slot-height content-size) 2)))
            (font-size (max 9 (floor (* content-size 0.28))))
            (svg (svg-create slot-width slot-height)))
-      (svg-rectangle svg 0 content-top content-size content-size
+      (svg-rectangle svg content-left content-top content-size content-size
                      :fill (ytm-radio--placeholder-thumbnail-fill item))
-      (svg-rectangle svg 0 content-top content-size content-size
+      (svg-rectangle svg content-left content-top content-size content-size
                      :fill "none"
                      :stroke "#4b5050"
                      :stroke-width 1)
       (svg-text svg (ytm-radio--placeholder-thumbnail-label item)
-                :x (/ content-size 2)
+                :x (+ content-left (/ content-size 2))
                 :y (+ content-top (/ content-size 2))
                 :fill "#d8dfd0"
                 :font-size font-size
@@ -4928,15 +4925,15 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
     (title . ,(ytm-radio--source-display-title source))))
 
 (defun ytm-radio--svg-detail-header-placeholder-image
-    (source &optional row-height row-count)
+    (source &optional row-layout)
   "Return a fixed-canvas square detail placeholder image for SOURCE.
-When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
+ROW-LAYOUT has the meaning documented by `ytm-radio--detail-header-cover-size'."
   (when (and (display-graphic-p)
              (featurep 'svg)
              (image-type-available-p 'svg)
              (fboundp 'svg-create))
     (let* ((item (ytm-radio--source-placeholder-item source))
-           (size (ytm-radio--detail-header-cover-size row-height row-count))
+           (size (ytm-radio--detail-header-cover-size row-layout))
            (font-size (max 18 (floor (* size 0.18))))
            (svg (svg-create size size)))
       (svg-rectangle svg 0 0 size size
@@ -4988,7 +4985,7 @@ When ROW-HEIGHT and ROW-COUNT are non-nil, size the canvas from them."
                    (if (eq (plist-get (cdr image) :type) 'svg)
                        (list image
                              (ytm-radio--browser-thumbnail-slot-width)
-                             (ytm-radio--browser-thumbnail-pixel-size)
+                             (ytm-radio--browser-thumbnail-source-height)
                              'fixed-canvas)
                      (list image (car size) (cdr size)))))))
           (when (and key thumbnail)
@@ -5097,21 +5094,21 @@ When UPDATE is non-nil, mutate an existing compatible state to THUMBNAIL."
 
 (defun ytm-radio--thumbnail-slice (thumbnail slice)
   "Return THUMBNAIL display string for top or bottom SLICE."
-  (let* ((slice-height (ytm-radio--browser-thumbnail-slice-height))
-         (display (if (eq (nth 3 thumbnail) 'fixed-canvas)
-                      `((slice 0
-                               ,(if (eq slice 'top)
-                                    0
-                                  (max 0 (1- slice-height)))
-                               1.0
-                               ,slice-height)
-                        ,(car thumbnail))
-                    `((slice 0.0
-                             ,(if (eq slice 'top) 0.0 0.49)
-                             1.0001
-                             0.51005)
-                      ,(car thumbnail)))))
-    (propertize " " 'display display 'line-height t)))
+  (let ((slice-height (ytm-radio--browser-thumbnail-slice-height)))
+    (if (eq (nth 3 thumbnail) 'fixed-canvas)
+        (image-slice-row
+         (car thumbnail)
+         (if (eq slice 'top) 0 1)
+         (list slice-height slice-height)
+         1)
+      (propertize
+       " "
+       'display `((slice 0.0
+                          ,(if (eq slice 'top) 0.0 0.49)
+                          1.0001
+                          0.51005)
+                   ,(car thumbnail))
+       'line-height t))))
 
 (defun ytm-radio--thumbnail-full (thumbnail)
   "Return THUMBNAIL display string for a full thumbnail cell."
@@ -5186,9 +5183,7 @@ SLICE is either `top', `bottom', or nil for the full placeholder."
   "Insert a row newline.
 When GAPLESS is non-nil, remove extra line spacing between thumbnail
 slices so covers do not appear split in the middle."
-  (insert (if gapless
-              (propertize "\n" 'line-height t)
-            "\n")))
+  (insert (if gapless (image-slice-newline) "\n")))
 
 (defun ytm-radio--insert-item-end-newline (&optional gap-height)
   "Insert an item-ending newline with optional visual GAP-HEIGHT."
@@ -5514,10 +5509,15 @@ slices so covers do not appear split in the middle."
   (or (ytm-radio--generic-section-title-p source)
       (ytm-radio--synthetic-detail-content-source-p source)))
 
-(defun ytm-radio--source-header-cover-image (source)
-  "Return a sliced detail header cover image descriptor for SOURCE."
+(defun ytm-radio--source-header-cover-image (source &optional row-layout)
+  "Return a sliced detail header cover image descriptor for SOURCE.
+When ROW-LAYOUT is non-nil, size and slice the cover using those row metrics."
   (let* ((row-height (ytm-radio--detail-header-row-height))
-         (row-count (ytm-radio--detail-header-row-count row-height))
+         (row-layout
+          (or row-layout
+              (make-list (ytm-radio--detail-header-row-count row-height)
+                         row-height)))
+         (row-count (length row-layout))
          (cover
           (when-let* ((url (and (display-graphic-p)
                                 (ytm-radio--source-thumbnail-url source)))
@@ -5527,16 +5527,16 @@ slices so covers do not appear split in the middle."
                                (when file
                                  (ytm-radio--render-browser))))))
             (ytm-radio--svg-detail-header-cover-image
-             file row-height row-count))))
+             file row-layout))))
     (when (and (not cover)
                (display-graphic-p)
                (ytm-radio--source-square-header-p source))
       (setq cover (ytm-radio--svg-detail-header-placeholder-image
-                   source row-height row-count)))
+                   source row-layout)))
     (when cover
       (list cover
-            (ytm-radio--detail-header-cover-size row-height row-count)
-            row-height
+            (ytm-radio--detail-header-cover-size row-layout)
+            row-layout
             row-count))))
 
 (defun ytm-radio--detail-view-tracks ()
@@ -5614,35 +5614,7 @@ When SHUFFLE is non-nil, start from a random track."
 
 (defun ytm-radio--detail-header-cover-slice (cover row)
   "Return COVER display slice for ROW."
-  (let* ((row-height (nth 2 cover))
-         (overlap (min ytm-radio--detail-header-cover-slice-overlap
-                       (max 0 (1- row-height))))
-         (slice-y (if (zerop row)
-                      0
-                    (max 0 (- (* row row-height) overlap)))))
-    (propertize " "
-                'display `((slice 0
-                                  ,slice-y
-                                  1.0
-                                  ,row-height)
-                            ,(car cover))
-                'line-height t)))
-
-(defun ytm-radio--detail-header-row-newline (cover)
-  "Return a newline with the same display row height as COVER slices."
-  (propertize "\n"
-              'line-height
-              (if cover
-                  (let ((row-height (nth 2 cover)))
-                    (cons row-height row-height))
-                t)))
-
-(defun ytm-radio--detail-header-apply-row-height (line cover)
-  "Return LINE with the same row height as COVER, when available."
-  (if cover
-      (let ((row-height (nth 2 cover)))
-        (propertize line 'line-height (cons row-height row-height)))
-    line))
+  (image-slice-row (car cover) row (nth 2 cover)))
 
 (defun ytm-radio--insert-detail-header-cover-cell (cover row)
   "Insert COVER cell for ROW."
@@ -5702,6 +5674,12 @@ When SHUFFLE is non-nil, start from a random track."
      (ytm-radio--detail-subscription-button-label source)
      (lambda () (ytm-radio-toggle-detail-subscription)))))
 
+(defun ytm-radio--detail-header-actions-string (source)
+  "Return the propertized detail header actions for SOURCE."
+  (with-temp-buffer
+    (ytm-radio--insert-detail-header-actions source)
+    (buffer-string)))
+
 (defun ytm-radio--detail-title-with-indicator (title indicator width)
   "Return TITLE with INDICATOR while fitting WIDTH columns."
   (concat (propertize
@@ -5728,6 +5706,21 @@ When SHUFFLE is non-nil, start from a random track."
    ((not (string-empty-p subtitle)) 2)
    (t 1)))
 
+(defun ytm-radio--detail-header-rows
+    (row-count title subtitle summary indicator &optional actions)
+  "Return ROW-COUNT detail rows using TITLE, SUBTITLE, and SUMMARY.
+INDICATOR is appended to the title.  When ACTIONS is non-nil, place it in
+the final row."
+  (let (rows)
+    (dotimes (row row-count)
+      (push (ytm-radio--detail-header-line
+             row title subtitle summary indicator)
+            rows))
+    (setq rows (nreverse rows))
+    (when actions
+      (setf (nth (1- row-count) rows) actions))
+    rows))
+
 (defun ytm-radio--insert-source-header (source &optional omit-leading-space)
   "Insert metadata-only SOURCE as a detail header.
 When OMIT-LEADING-SPACE is non-nil, do not insert the leading blank line."
@@ -5735,37 +5728,54 @@ When OMIT-LEADING-SPACE is non-nil, do not insert the leading blank line."
          (subtitle (or (ytm-radio--source-subtitle source) ""))
          (summary (ytm-radio--detail-header-summary source))
          (indicator (or (ytm-radio--source-status-indicator source) ""))
-         (square-header-p (ytm-radio--source-square-header-p source)))
-    (let* ((cover (and square-header-p
-                       (ytm-radio--source-header-cover-image source)))
-           (row-count (or (nth 3 cover) 5))
-           (metadata-row-count
-            (ytm-radio--detail-header-metadata-row-count subtitle summary))
-           (inline-actions-p
-            (and (ytm-radio--detail-header-actions-p source)
-                 (< metadata-row-count row-count)))
-           (start (point)))
+         (square-header-p (ytm-radio--source-square-header-p source))
+         (actions-p (ytm-radio--detail-header-actions-p source))
+         (actions (and actions-p
+                       (ytm-radio--detail-header-actions-string source)))
+         (metadata-row-count
+          (ytm-radio--detail-header-metadata-row-count subtitle summary))
+         (minimum-row-height (ytm-radio--detail-header-row-height))
+         (cover-row-count
+          (ytm-radio--detail-header-row-count minimum-row-height))
+         (cover-actions
+          (and actions
+               (< metadata-row-count cover-row-count)
+               actions))
+         (cover-rows
+          (and square-header-p
+               (ytm-radio--detail-header-rows
+                cover-row-count title subtitle summary indicator
+                cover-actions)))
+         (row-layout
+          (and cover-rows
+               (image-slice-measure-row-metrics
+                cover-rows minimum-row-height)))
+         (cover (and square-header-p
+                     (ytm-radio--source-header-cover-image
+                      source row-layout)))
+         (row-count (or (nth 3 cover) 5))
+         (inline-actions-p
+          (and actions (< metadata-row-count row-count)))
+         (rows (ytm-radio--detail-header-rows
+                row-count title subtitle summary indicator
+                (and inline-actions-p actions)))
+         (start (point)))
       (unless omit-leading-space
         (insert "\n"))
       (dotimes (row row-count)
         (ytm-radio--insert-detail-header-cover-cell cover row)
-        (if (and inline-actions-p
-                 (= row (1- row-count)))
-            (ytm-radio--insert-detail-header-actions source)
-          (when-let* ((line (ytm-radio--detail-header-line
-                             row title subtitle summary indicator)))
-            (insert (ytm-radio--detail-header-apply-row-height
-                     line cover))))
-        (insert (ytm-radio--detail-header-row-newline cover)))
+        (when-let* ((line (nth row rows)))
+          (insert line))
+        (insert (image-slice-newline)))
       (unless inline-actions-p
-        (when (ytm-radio--detail-header-actions-p source)
+        (when actions
           (insert "  ")
-          (ytm-radio--insert-detail-header-actions source)
+          (insert actions)
           (insert "\n")))
       (ytm-radio--insert-browser-heading-padding)
       (add-text-properties start (point)
                            (list 'ytm-radio-section t
-                                 'ytm-radio-source source)))))
+                                 'ytm-radio-source source))))
 
 (defun ytm-radio--render ()
   "Render all visible ytm-radio buffers."
@@ -7347,8 +7357,9 @@ When AFTER-SUCCESS is non-nil, call it after importing auth."
   (interactive)
   (ytm-radio--ensure-loaded)
   (let ((buffer (ytm-radio--buffer)))
-    (ytm-radio--render)
     (ytm-radio--show-buffer buffer)
+    ;; Detail row metrics need a live window displaying the browser buffer.
+    (ytm-radio--render)
     (ytm-radio--maybe-refresh-initial-home)))
 
 ;;;###autoload

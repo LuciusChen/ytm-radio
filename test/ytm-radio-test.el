@@ -34,6 +34,10 @@
 (defconst ytm-radio-test--helper-download-content "#!/bin/sh\n"
   "Binary fixture content used by helper installer tests.")
 
+(defconst ytm-radio-test--cover-image
+  '(image :type svg :data "cover")
+  "Valid image descriptor used by cover-slice tests.")
+
 (defun ytm-radio-test--copy-helper-release-file (url file)
   "Write the helper release fixture requested by URL to FILE."
   (with-temp-file file
@@ -1032,6 +1036,21 @@ FIELDS are included on both the top-level mutation output and source."
       (ytm-radio)
       (should-not started))))
 
+(ert-deftest ytm-radio-open-shows-browser-before-rendering ()
+  "Display the browser before measuring graphical detail rows."
+  (let (events)
+    (cl-letf (((symbol-function 'ytm-radio--ensure-loaded) #'ignore)
+              ((symbol-function 'ytm-radio--buffer)
+               (lambda () (current-buffer)))
+              ((symbol-function 'ytm-radio--show-buffer)
+               (lambda (_buffer) (push 'show events)))
+              ((symbol-function 'ytm-radio--render)
+               (lambda () (push 'render events)))
+              ((symbol-function 'ytm-radio--maybe-refresh-initial-home)
+               (lambda () (push 'refresh events))))
+      (ytm-radio))
+    (should (equal (nreverse events) '(show render refresh)))))
+
 (ert-deftest ytm-radio-open-refreshes-cached-home-with-unknown-continuation ()
   "Refresh old cached Home state when continuation was never persisted."
   (let* ((stale-home (ytm-radio--make-source
@@ -1950,7 +1969,7 @@ FIELDS are included on both the top-level mutation output and source."
       (let ((inhibit-read-only t))
         (erase-buffer)))
     (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-               (lambda (_source) nil)))
+               (lambda (_source &optional _row-layout) nil)))
       (ytm-radio--render-browser))
     (with-current-buffer "*ytm-radio*"
       (goto-char (point-min))
@@ -1997,7 +2016,9 @@ FIELDS are included on both the top-level mutation output and source."
                   :thumbnail-url "https://example.com/cover.jpg")))
     (with-temp-buffer
       (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-                 (lambda (_source) (list 'cover-image 90 10 3)))
+                 (lambda (_source &optional _row-layout)
+                   (list ytm-radio-test--cover-image
+                         36 '(10 12 14) 3)))
                 ((symbol-function 'ytm-radio--detail-view-tracks)
                  (lambda () nil)))
         (ytm-radio--insert-source-header source))
@@ -2009,19 +2030,35 @@ FIELDS are included on both the top-level mutation output and source."
         (while (and (not display) (< (point) (point-max)))
           (setq display (get-text-property (point) 'display))
           (forward-char 1))
-        (should (equal display '((slice 0 0 1.0 10) cover-image)))))))
+        (should (equal (car display) '(slice 0 0 1.0 10)))
+        (should (equal (plist-get (cdr (cadr display)) :data) "cover"))
+        (should (= (plist-get (cdr (cadr display)) :height) 36))))))
 
-(ert-deftest ytm-radio-detail-header-cover-slices-overlap ()
-  "Overlap adjacent detail header cover slices to avoid row gaps."
-  (let ((cover (list 'cover-image 90 10 3)))
-    (should (equal (get-text-property
-                    0 'display
-                    (ytm-radio--detail-header-cover-slice cover 0))
-                   '((slice 0 0 1.0 10) cover-image)))
-    (should (equal (get-text-property
-                    0 'display
-                    (ytm-radio--detail-header-cover-slice cover 1))
-                   '((slice 0 9 1.0 10) cover-image)))))
+(ert-deftest ytm-radio-detail-header-cover-slices-use-variable-row-heights ()
+  "Accumulate variable detail row heights without losing source pixels."
+  (let* ((cover (list ytm-radio-test--cover-image
+                      66 '(12 18 15 21) 4))
+         (first (get-text-property
+                 0 'display
+                 (ytm-radio--detail-header-cover-slice cover 0)))
+         (last (get-text-property
+                0 'display
+                (ytm-radio--detail-header-cover-slice cover 3))))
+    (should (equal (car first) '(slice 0 0 1.0 12)))
+    (should (equal (car last) '(slice 0 45 1.0 21)))
+    (should (= (plist-get (cdr (cadr last)) :height) 66))))
+
+(ert-deftest ytm-radio-detail-header-cover-slices-use-row-baselines ()
+  "Align every detail cover slice with its corresponding text baseline."
+  (let* ((image '(image :type svg :data "cover" :ascent center))
+         (cover (list image 47 '((28 . 65) (19 . 79)) 2))
+         (display (get-text-property
+                   0 'display
+                   (ytm-radio--detail-header-cover-slice cover 1)))
+         (sliced-image (cadr display)))
+    (should (equal (car display) '(slice 0 28 1.0 19)))
+    (should (= (plist-get (cdr sliced-image) :ascent) 79))
+    (should (eq (plist-get (cdr image) :ascent) 'center))))
 
 (ert-deftest ytm-radio-detail-header-rows-use-cover-line-height ()
   "Keep sliced detail cover rows at the same height as their newlines."
@@ -2032,7 +2069,9 @@ FIELDS are included on both the top-level mutation output and source."
                  :subtitle "Album - Kolisnik & LoFi Beats")))
     (with-temp-buffer
       (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-                 (lambda (_source) (list 'cover-image 90 10 3)))
+                 (lambda (_source &optional _row-layout)
+                   (list ytm-radio-test--cover-image
+                         36 '(10 12 14) 3)))
                 ((symbol-function 'ytm-radio--detail-view-tracks)
                  (lambda () nil)))
         (ytm-radio--insert-source-header source t))
@@ -2042,38 +2081,52 @@ FIELDS are included on both the top-level mutation output and source."
           (push (get-text-property (1- (point)) 'line-height)
                 line-heights))
         (should (equal (seq-filter #'identity (nreverse line-heights))
-                       '((10 . 10) (10 . 10) (10 . 10))))))))
+                       '(t t t)))))))
 
-(ert-deftest ytm-radio-detail-header-row-height-adds-cjk-padding ()
-  "Apply padded detail header row height to cover and text rows."
+(ert-deftest ytm-radio-detail-header-uses-per-row-cjk-metrics ()
+  "Pass independently measured CJK row metrics into the cover layout."
   (let* ((row-height (ytm-radio--detail-header-row-height))
          (source (ytm-radio--make-source
                   :id "ytm:browse:VLPL1:header"
                   :kind 'youtube-music-playlist
                   :title "新加坡百佳音乐视频"
                   :subtitle "排行榜 - YouTube Music"))
-         cover-called)
+         measured-rows
+         cover-layout)
     (with-temp-buffer
-      (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-                 (lambda (_source)
-                   (setq cover-called t)
-                   (list 'cover-image (* row-height 3) row-height 3)))
+      (cl-letf (((symbol-function 'image-slice-measure-row-metrics)
+                 (lambda (rows minimum-height &optional _window)
+                   (setq measured-rows rows)
+                   (cons (cons (+ minimum-height 7) 71)
+                         (make-list (1- (length rows))
+                                    (cons minimum-height 79)))))
+                ((symbol-function 'ytm-radio--source-header-cover-image)
+                 (lambda (_source &optional row-layout)
+                   (setq cover-layout row-layout)
+                   (list ytm-radio-test--cover-image
+                         (image-slice-total-height row-layout)
+                         row-layout
+                         (length row-layout))))
                 ((symbol-function 'ytm-radio--detail-view-tracks)
                  (lambda () nil)))
         (ytm-radio--insert-source-header source t))
-      (should cover-called)
+      (should (equal cover-layout
+                     (cons (cons (+ row-height 7) 71)
+                           (make-list (1- (length measured-rows))
+                                      (cons row-height 79)))))
+      (should (string-match-p "新加坡百佳音乐视频" (car measured-rows)))
       (goto-char (point-min))
       (should (search-forward "新加坡百佳音乐视频" nil t))
-      (should (equal (get-text-property (match-beginning 0) 'line-height)
-                     (cons row-height row-height)))
-      (let (line-heights)
+      (let (display)
         (goto-char (point-min))
-        (while (search-forward "\n" nil t)
-          (push (get-text-property (1- (point)) 'line-height)
-                line-heights))
-        (should (equal (seq-filter #'identity (nreverse line-heights))
-                       (make-list 3
-                                  (cons row-height row-height))))))))
+        (while (and (not display) (< (point) (point-max)))
+          (setq display (get-text-property (point) 'display))
+          (forward-char 1))
+        (should (equal (car display)
+                       `(slice 0 0 1.0 ,(+ row-height 7))))
+        (should (= (plist-get (cdr (cadr display)) :height)
+                   (image-slice-total-height cover-layout)))
+        (should (= (plist-get (cdr (cadr display)) :ascent) 71))))))
 
 (ert-deftest ytm-radio-detail-header-row-height-follows-remapped-font ()
   "Grow detail cover rows with the current buffer font."
@@ -2095,13 +2148,16 @@ FIELDS are included on both the top-level mutation output and source."
                   :subtitle "Album - Kolisnik & LoFi Beats")))
     (with-temp-buffer
       (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-                 (lambda (_source) (list 'cover-image 90 10 6)))
+                 (lambda (_source &optional _row-layout)
+                   (list ytm-radio-test--cover-image
+                         60 '(10 10 10 10 10 10) 6)))
                 ((symbol-function 'ytm-radio--detail-view-tracks)
                  (lambda () (list track))))
         (ytm-radio--insert-source-header source t))
       (goto-char (point-min))
       (should (= (line-number-at-pos (point)) 1))
       (should (search-forward "Play" nil t))
+      (should (button-at (match-beginning 0)))
       (should (= (line-number-at-pos (match-beginning 0)) 6)))))
 
 (ert-deftest ytm-radio-detail-headers-use-square-layout-for-artwork ()
@@ -2142,11 +2198,48 @@ FIELDS are included on both the top-level mutation output and source."
     (cl-letf (((symbol-function 'display-graphic-p)
                (lambda (&optional _display) t))
               ((symbol-function 'ytm-radio--svg-detail-header-placeholder-image)
-               (lambda (_source &optional _row-height _row-count)
+               (lambda (_source &optional _row-layout)
                  'placeholder-cover)))
       (let ((cover (ytm-radio--source-header-cover-image source)))
         (should (equal (car cover) 'placeholder-cover))
         (should (= (nth 1 cover) (ytm-radio--detail-header-cover-size)))))))
+
+(ert-deftest ytm-radio-detail-cover-preserves-variable-row-layout ()
+  "Size detail cover canvases from the sum of their variable rows."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:VLPL1:header"
+                 :kind 'youtube-music-playlist
+                 :title "Lofi Loft"))
+        (row-layout '((12 . 70) (18 . 75) (15 . 80) (21 . 65)))
+        captured-layout)
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _display) t))
+              ((symbol-function 'ytm-radio--svg-detail-header-placeholder-image)
+               (lambda (_source &optional row-layout)
+                 (setq captured-layout row-layout)
+                 'placeholder-cover)))
+      (let ((cover (ytm-radio--source-header-cover-image
+                    source row-layout)))
+        (should (equal captured-layout row-layout))
+        (should (equal cover
+                       (list 'placeholder-cover 66 row-layout 4)))))))
+
+(ert-deftest ytm-radio-detail-placeholder-uses-one-to-one-pixel-dimensions ()
+  "Keep image dimensions aligned with integer slice coordinates."
+  (let ((source (ytm-radio--make-source
+                 :id "ytm:browse:VLPL1:header"
+                 :kind 'youtube-music-playlist
+                 :title "Lofi Loft"))
+        (row-layout '(12 18 15 21)))
+    (cl-letf (((symbol-function 'display-graphic-p)
+               (lambda (&optional _display) t))
+              ((symbol-function 'image-type-available-p)
+               (lambda (type) (eq type 'svg))))
+      (let* ((image (ytm-radio--svg-detail-header-placeholder-image
+                     source row-layout))
+             (properties (cdr image)))
+        (should (= (plist-get properties :width) 66))
+        (should (= (plist-get properties :height) 66))))))
 
 (ert-deftest ytm-radio-detail-header-cover-download-rerenders-browser ()
   "Refresh detail headers when an uncached cover download completes."
@@ -2184,7 +2277,9 @@ FIELDS are included on both the top-level mutation output and source."
     (should-not (ytm-radio--empty-detail-header-p source))
     (with-temp-buffer
       (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-                 (lambda (_source) (list 'cover-image 90 10 3)))
+                 (lambda (_source &optional _row-layout)
+                   (list ytm-radio-test--cover-image
+                         30 '(10 10 10) 3)))
                 ((symbol-function 'ytm-radio--detail-view-tracks)
                  (lambda () nil)))
         (ytm-radio--insert-source-header source t))
@@ -2498,7 +2593,9 @@ FIELDS are included on both the top-level mutation output and source."
       (let ((inhibit-read-only t))
         (erase-buffer)))
     (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-               (lambda (_source) (list 'cover-image 90 10 3))))
+               (lambda (_source &optional _row-layout)
+                 (list ytm-radio-test--cover-image
+                       30 '(10 10 10) 3))))
       (ytm-radio--render))
     (with-current-buffer "*ytm-radio*"
       (let ((contents (buffer-string)))
@@ -2622,9 +2719,10 @@ FIELDS are included on both the top-level mutation output and source."
          cover-called)
     (with-temp-buffer
       (cl-letf (((symbol-function 'ytm-radio--source-header-cover-image)
-                 (lambda (_source)
+                 (lambda (_source &optional _row-layout)
                    (setq cover-called t)
-                   (list 'cover-image 90 10 3)))
+                   (list ytm-radio-test--cover-image
+                         30 '(10 10 10) 3)))
                 ((symbol-function 'ytm-radio--detail-view-tracks)
                  (lambda () nil)))
         (ytm-radio--insert-source-header source t))
@@ -2756,6 +2854,47 @@ FIELDS are included on both the top-level mutation output and source."
     (ytm-radio--insert-item-row-newline nil)
     (should-not (get-text-property (point-min) 'line-height))))
 
+(ert-deftest ytm-radio-fixed-thumbnail-slices-use-image-row-layout ()
+  "Keep the established one-pixel seam overlap for two-row thumbnails."
+  (let* ((image '(image :type svg :data "cover"
+                        :width 20 :height 19 :scale 1.0))
+         (thumbnail (list image 20 19 'fixed-canvas)))
+    (cl-letf (((symbol-function 'ytm-radio--browser-thumbnail-slice-height)
+               (lambda () 10)))
+      (let ((top (get-text-property
+                  0 'display (ytm-radio--thumbnail-slice thumbnail 'top)))
+            (bottom (get-text-property
+                     0 'display
+                     (ytm-radio--thumbnail-slice thumbnail 'bottom))))
+        (should (equal (car top) '(slice 0 0 1.0 10)))
+        (should (equal (car bottom) '(slice 0 9 1.0 10)))
+        (should (= (plist-get (cdr (cadr top)) :height) 19))
+        (should (= (plist-get (cdr (cadr bottom)) :height) 19))
+        (should (= (plist-get (cdr image) :height) 19))))))
+
+(ert-deftest ytm-radio-fixed-thumbnail-canvas-matches-overlap-source-height ()
+  "Build fixed SVG thumbnails in the same pixel space used by their slices."
+  (let ((ytm-radio-browser-thumbnail-size 48)
+        (ytm-radio-browser-thumbnail-layout 'split)
+        (ytm-radio-browser-item-line-height-scale 1.0))
+    (cl-letf (((symbol-function 'frame-char-height)
+               (lambda (&optional _frame) 31))
+              ((symbol-function 'display-graphic-p)
+               (lambda (&optional _frame) t))
+              ((symbol-function 'image-type-available-p)
+               (lambda (type) (eq type 'svg))))
+      (let* ((thumbnail (ytm-radio--placeholder-thumbnail-image
+                         '((type . "album") (title . "Album"))))
+             (image (car thumbnail))
+             (properties (cdr image)))
+        (should (= (nth 1 thumbnail) 62))
+        (should (= (nth 2 thumbnail) 61))
+        (should (= (plist-get properties :width) 62))
+        (should (= (plist-get properties :height) 61))
+        (should (string-prefix-p
+                 "<svg width=\"62\" height=\"61\""
+                 (plist-get properties :data)))))))
+
 (ert-deftest ytm-radio-thumbnail-height-follows-text-rows ()
   "Keep split thumbnail slices at least as tall as rendered text rows."
   (let ((ytm-radio-browser-thumbnail-size 48)
@@ -2763,7 +2902,9 @@ FIELDS are included on both the top-level mutation output and source."
     (cl-letf (((symbol-function 'frame-char-height)
                (lambda (&optional _frame) 31)))
       (should (= (ytm-radio--browser-thumbnail-row-height) 31))
-      (should (= (ytm-radio--browser-thumbnail-pixel-size) 62)))))
+      (should (= (ytm-radio--browser-thumbnail-pixel-size) 62))
+      (should (= (ytm-radio--browser-thumbnail-source-height) 61))
+      (should (= (ytm-radio--browser-thumbnail-canvas-content-size) 61)))))
 
 (ert-deftest ytm-radio-thumbnail-height-follows-remapped-buffer-font ()
   "Use the displayed buffer font height without capping thumbnail growth."
@@ -2801,7 +2942,9 @@ FIELDS are included on both the top-level mutation output and source."
       (should (= (ytm-radio--browser-thumbnail-row-height) 30))
       (should (= (ytm-radio--browser-thumbnail-gap-pixels) 12))
       (should (= (ytm-radio--browser-thumbnail-pixel-size) 72))
-      (should (= (ytm-radio--browser-thumbnail-slice-height) 36)))))
+      (should (= (ytm-radio--browser-thumbnail-slice-height) 36))
+      (should (= (ytm-radio--browser-thumbnail-source-height) 71))
+      (should (= (ytm-radio--browser-thumbnail-canvas-content-size) 60)))))
 
 (ert-deftest ytm-radio-browser-thumbnail-layout-first-line-uses-content-height ()
   "Scale first-line thumbnail content with item row height."
@@ -2813,6 +2956,8 @@ FIELDS are included on both the top-level mutation output and source."
       (should (= (ytm-radio--browser-thumbnail-content-size) 60))
       (should (= (ytm-radio--browser-thumbnail-row-height) 30))
       (should (= (ytm-radio--browser-thumbnail-pixel-size) 60))
+      (should (= (ytm-radio--browser-thumbnail-source-height) 60))
+      (should (= (ytm-radio--browser-thumbnail-canvas-content-size) 60))
       (should (= (ytm-radio--browser-item-end-gap-height) 0.6)))))
 
 (ert-deftest ytm-radio-browser-item-line-height-scale-keeps-row-count ()

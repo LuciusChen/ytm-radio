@@ -68,6 +68,7 @@ YouTube Music page instead of hardcoding the API key.
 ## Requirements
 
 - Emacs 29.1 or newer
+- [`image-slice` 0.1.0 or newer](https://github.com/LuciusChen/image-slice)
 - `transient`
 - `yt-dlp`
 - `mpv`
@@ -77,9 +78,11 @@ No Python runtime or Python package is used.
 
 ## Setup
 
-Load the Emacs package:
+Install `image-slice` first. For local checkouts, add both repositories to
+`load-path` before loading ytm-radio:
 
 ```elisp
+(add-to-list 'load-path "/Users/luciuschen/repos/image-slice")
 (add-to-list 'load-path "/Users/luciuschen/repos/ytm-radio")
 (require 'ytm-radio)
 ```
@@ -121,7 +124,9 @@ thumbnails show row gaps in your Emacs build, set
 the title row while keeping detail text aligned below; the same line-height
 scale then adds visual space between item blocks. Library uses the same item row
 layout as Home and Explore. Buffer-local text scaling also resizes browser
-thumbnails and detail covers to match the displayed font.
+thumbnails and detail covers to match the displayed font. Detail covers measure
+their rendered rows independently, so a taller CJK or emoji fallback font only
+enlarges the affected image slice instead of shifting every later slice.
 Thumbnail downloads in large browser views are capped per render to reduce UI
 jank while covers are still loading. Customize
 `ytm-radio-browser-thumbnail-downloads-per-render` to change the batch size, or
@@ -608,6 +613,20 @@ next track to start faster when the cached stream URL is still valid:
 Set `ytm-radio-mpv-extra-args` to override these values when needed. Extra args
 are passed after the default playback args, so mpv's later option wins.
 
+## Image Slicing Dependency
+
+ytm-radio consumes the separately maintained `image-slice` package. The library
+has no ytm-radio dependency and supports both equal-height two-row images and
+variable-height multirow images.
+Call `image-slice-measure-row-metrics` to measure each row's final line-box
+height and baseline, then pass that layout to `image-slice-row`. Use
+`image-slice-newline` between slices. The source canvas and image descriptor must
+use the same one-to-one pixel height returned by `image-slice-source-height`.
+With zero overlap this equals `image-slice-total-height`; with overlap it excludes
+the repeated boundary pixels. Font-relative dimensions are unsuitable when slice
+coordinates are integer pixels. Buffers that tile slices should set their local
+`line-spacing` to zero.
+
 ## Development
 
 Run all deterministic checks:
@@ -615,6 +634,10 @@ Run all deterministic checks:
 ```sh
 make check
 ```
+
+For a local checkout, `IMAGE_SLICE_PATH` defaults to `~/repos/image-slice`;
+override it when the [independent repository](https://github.com/LuciusChen/image-slice)
+lives elsewhere.
 
 This byte-compiles Elisp, runs ERT, checkdoc, package-lint, Rust formatting,
 Clippy, and unit tests.
